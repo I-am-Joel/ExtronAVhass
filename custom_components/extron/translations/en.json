@@ -1,0 +1,76 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Extron matrix switcher",
+        "description": "Address of the switcher's Ethernet port (Telnet, port 23). Leave the password empty if the unit has none. Telnet is not encrypted, so only use this on a network you trust.",
+        "data": {
+          "name": "Name",
+          "host": "IP address",
+          "port": "Port",
+          "password": "Administrator password (optional)",
+          "read_only": "Read-only (look but never change anything)"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Extron unit",
+        "description": "Change how Home Assistant reaches this unit. Leave the password empty if the unit has none.",
+        "data": {
+          "host": "IP address",
+          "port": "Port",
+          "password": "Administrator password (optional)",
+          "read_only": "Read-only (look but never change anything)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Extron password needed",
+        "description": "The unit asked for a password that is missing or was not accepted.",
+        "data": {
+          "password": "Administrator password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the unit. Check the address and that Telnet (port 23) is allowed.",
+      "invalid_auth": "The unit asked for a password and it was missing or not accepted.",
+      "not_extron": "Something answered, but it did not behave like an Extron matrix switcher."
+    },
+    "abort": {
+      "already_configured": "This unit is already set up.",
+      "different_unit": "That address answered, but it is a different unit.",
+      "reconfigure_successful": "The unit's settings were updated.",
+      "reauth_successful": "The password was updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Names and refresh",
+        "description": "One name per line, in input or output order. Delete a line's text to go back to the default. Names only change what Home Assistant shows; nothing is written to the unit.",
+        "data": {
+          "input_names": "Video input names",
+          "audio_input_names": "Audio input names",
+          "output_names": "Video output names",
+          "audio_output_names": "Audio output names",
+          "refresh_seconds": "Full refresh every (seconds)"
+        },
+        "data_description": {
+          "refresh_seconds": "The unit reports changes by itself; this is only a safety net."
+        }
+      }
+    },
+    "error": {
+      "wrong_count": "Give exactly one name per line, for every input or output.",
+      "duplicate_names": "Two names are the same.",
+      "reserved_name": "\"None\" and \"Mixed\" are reserved."
+    },
+    "abort": {
+      "unit_unavailable": "The unit is not set up right now, so its names are not known. Try again once it is online."
+    }
+  },
+  "exceptions": {
+    "read_only": {
+      "message": "This unit is set to read-only. Turn that off with Reconfigure to make changes."
+    }
+  }
+}
