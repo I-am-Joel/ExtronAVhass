@@ -28,9 +28,13 @@ For each switcher you add, one device with:
 | Front panel lock | `select` | Off, Mode 1 or Mode 2 (diagnostic category). |
 | *Input* / *Output* Group | `select` | Off by default. The unit's I/O group (see [Limitations](#limitations)). |
 | All outputs | `media_player` | Choose one input (or **None**) for **every** output at once, video and audio. Shows **Mixed** when the outputs differ. |
+| All outputs Input | `select` | The same as the **All outputs** media player, as a drop-down: choose one input (or **None**) for every output, video and audio. Shows **Mixed** when the outputs differ. |
 | Mute all video / Mute all audio | `switch` | On when every output is muted; turning it on or off mutes or unmutes them all. |
 | Routing summary | `sensor` | "24 of 24 outputs routed"; the attributes list every output's video and audio source, and every input's outputs. |
 | Sync clock | `button` | Sets the unit's clock to Home Assistant's local time (configuration category). |
+| Time zone | `select` | The unit's offset from GMT, every half hour from -12:00 to +14:00 (configuration category). Choosing one also sets the unit's clock to Home Assistant's local time, because the unit's displayed time moves with the offset. |
+| Daylight saving | `select` | Off, North America, Europe or Brazil (configuration category). |
+| Reset all mutes / Reset all input levels / Reset all output volumes | `button` | Off by default. See [Resets](#resets). |
 | Temperature, Fan 1 / 2 speed, voltage rails | `sensor` | Diagnostic. Temperature in °C, fans in rpm. |
 | Primary / Secondary power supply | `binary_sensor` | Diagnostic. **On means a fault.** |
 | Firmware, part number, unit name, IP address, subnet mask, gateway, MAC address, DHCP, unit clock, time zone offset, daylight saving, open connections, connection timeout, serial port settings, free file space, inputs, outputs, outputs with a source | `sensor` | Diagnostic information, refreshed with each full refresh. |
@@ -59,8 +63,10 @@ none. The unit must have Ethernet; the front-panel RS-232 jack is not used.
   entities or automations ask. Controls still show the unit's state; trying to
   use one gives a clear error. Use this for a unit that is in service.
 * With an administrator password the integration can change anything the front
-  panel can, including presets and the lock. It never sends a reset command and
-  never changes a password or the network settings.
+  panel can, including presets and the lock. It never sends a whole-switcher or factory
+  reset and never changes a password or the network settings. The only resets it
+  can send are the three milder ones in [Resets](#resets) (off by default, and
+  each needs a second press) and the one-preset **Clear preset**.
 
 ## Route action
 
@@ -84,10 +90,27 @@ nothing is changed. A read-only unit refuses it.
 
 ## Advanced controls
 
-The input and output **Group** selects and the **Save / Clear preset** buttons
-are off by default. **Configure > Show advanced controls** turns them all on
+The input and output **Group** selects, the **Save / Clear preset** buttons and the
+three **Reset all ...** buttons are off by default. **Configure > Show advanced controls** turns them all on
 together; unticking turns them all off again (including any you had switched on
 by hand). Home Assistant reloads the unit about 30 seconds after enabling.
+
+## Resets
+
+Three buttons (off by default; see Advanced controls) reset one kind of setting
+on every input or output at once:
+
+* **Reset all mutes** unmutes the video and audio of every output.
+* **Reset all input levels** sets every audio input level to 0 dB.
+* **Reset all output volumes** sets every output's volume to 64, the top of the
+  unit's scale. **Anything audible connected to the outputs could suddenly be
+  loud.**
+
+Each button needs a **second press within 10 seconds**; the first press only arms
+it and shows a notification saying what will happen. The unit does not announce
+these resets, so the integration reads everything again afterwards. A read-only
+unit refuses them. Nothing else changes (ties, presets, names, network settings
+and passwords are untouched).
 
 ## Presets
 
@@ -127,8 +150,11 @@ the integration reconnects by itself.
   Home Assistant ignore them.
 * **Recall** restores the preset's ties only.
 * **Volume** is shown on the unit's own 0 to 64 scale.
-* **Clock:** the unit's time-zone offset is not changed. Sync clock writes local
-  time, which is what the unit then displays.
+* **Clock and time zone:** the unit's clock shows local time, so it moves when
+  the time zone changes. Choosing a **Time zone** therefore also sets the clock
+  to Home Assistant's local time. Offsets that are not a whole or half hour
+  (such as +05:45) are not offered. A unit that has its offset set some other
+  way shows no choice selected.
 * **Diagnostics on smaller units:** units up to the 1616 reply to the status
   command in a different, shorter form that is not understood yet, so they get
   no temperature, fan, power or voltage sensors until it is probed.
@@ -144,3 +170,7 @@ pytest
 
 The tests run against a simulated unit (`tests/ha/sim.py`) built from what the
 real unit did in the probe runs.
+
+## Licence
+
+MIT (see the `LICENSE` file). Copyright (c) 2026 Joel Goodman.

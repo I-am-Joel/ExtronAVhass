@@ -57,7 +57,7 @@
         },
         "data_description": {
           "refresh_seconds": "The unit reports changes by itself; this is only a safety net.",
-          "show_advanced": "Turns on the group selects and the save and clear preset buttons (they are off by default). Unticking turns them off again."
+          "show_advanced": "Turns on the group selects, the save and clear preset buttons and the three reset buttons (they are off by default). Unticking turns them off again."
         }
       }
     },

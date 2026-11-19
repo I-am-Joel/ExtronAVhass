@@ -10,8 +10,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from homeassistant.util import dt as dt_util
+
 from . import strip_video
-from .const import GROUP_OPTIONS, LOCK_OPTIONS, SOURCE_MIXED
+from .const import DST_OPTIONS, GROUP_OPTIONS, LOCK_OPTIONS, SOURCE_MIXED
+from .protocol import MAX_OFFSET_MINUTES, MIN_OFFSET_MINUTES
 from .entity import (
     ExtronConfigEntry,
     ExtronEntity,
@@ -22,6 +25,19 @@ from .entity import (
 
 LOCK_BY_LABEL = {label: mode for mode, label in LOCK_OPTIONS.items()}
 GROUP_BY_LABEL = {label: group for group, label in GROUP_OPTIONS.items()}
+DST_BY_LABEL = {label: rule for rule, label in DST_OPTIONS.items()}
+
+
+def _zone_label(minutes: int) -> str:
+    sign = "-" if minutes < 0 else "+"
+    hours, mins = divmod(abs(minutes), 60)
+    return f"GMT{sign}{hours:02d}:{mins:02d}"
+
+
+# Every half hour from -12:00 to +14:00. (:45 offsets are not offered: only whole and half hours were tested.)
+ZONE_OPTIONS = {
+    _zone_label(m): m for m in range(MIN_OFFSET_MINUTES, MAX_OFFSET_MINUTES + 1, 30)
+}
 
 
 async def async_setup_entry(
@@ -31,7 +47,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up the selects."""
     data = entry.runtime_data
-    entities: list[SelectEntity] = [ExtronLockSelect(entry)]
+    entities: list[SelectEntity] = [
+        ExtronAllOutputsSelect(entry),
+        ExtronLockSelect(entry),
+        ExtronTimeZoneSelect(entry),
+        ExtronDaylightSavingSelect(entry),
+    ]
     for output in range(1, data.client.outputs + 1):
         entities.append(ExtronLinkedSelect(entry, output))
         entities.append(ExtronLayerSelect(entry, output, video=True))
@@ -185,3 +206,92 @@ class ExtronLockSelect(ExtronEntity, SelectEntity):
     async def async_select_option(self, option: str) -> None:
         """Set the lock mode."""
         await self._call(self._client.async_set_lock(LOCK_BY_LABEL[option]))
+
+
+class ExtronAllOutputsSelect(ExtronEntity, SelectEntity):
+    """Choose one input for the video and audio of every output at once (shows Mixed if they differ)."""
+
+    _attr_name = "All outputs Input"
+    _attr_icon = "mdi:export-variant"
+
+    def __init__(self, entry: ExtronConfigEntry) -> None:
+        """Initialise."""
+        super().__init__(entry, "all_outputs_link")
+        self._names = [strip_video(n) for n in self._data.in_video]
+        self._attr_options = [*source_options(self._names), SOURCE_MIXED]
+
+    @property
+    def current_option(self) -> str | None:
+        """Return the input feeding every output (video and audio), or Mixed."""
+        client = self._client
+        outputs = range(1, client.outputs + 1)
+        values = {client.video.get(o) for o in outputs} | {client.audio.get(o) for o in outputs}
+        if None in values:
+            return None
+        if len(values) != 1:
+            return SOURCE_MIXED
+        return number_to_name(self._names, values.pop())
+
+    async def async_select_option(self, option: str) -> None:
+        """Tie the chosen input to every output, video and audio."""
+        if option == SOURCE_MIXED:
+            raise ServiceValidationError(
+                "Mixed is only a status. Choose an input or None instead."
+            )
+        await self._call(
+            self._client.async_set_tie_all(name_to_number(self._names, option))
+        )
+
+
+class ExtronTimeZoneSelect(ExtronEntity, SelectEntity):
+    """The unit's time zone offset from GMT. Changing it also sets the unit's clock to Home Assistant's local time."""
+
+    _attr_name = "Time zone"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_options: ClassVar[list[str]] = list(ZONE_OPTIONS)
+    _attr_icon = "mdi:earth"
+
+    def __init__(self, entry: ExtronConfigEntry) -> None:
+        """Initialise."""
+        super().__init__(entry, "time_zone")
+
+    @property
+    def current_option(self) -> str | None:
+        """Return the offset, or None if the unit holds one that is not in the list."""
+        offset = self._client.info.get("gmt_offset")
+        if not isinstance(offset, str):
+            return None
+        sign = -1 if offset.startswith("-") else 1
+        minutes = sign * (int(offset[1:3]) * 60 + int(offset[4:6]))
+        label = _zone_label(minutes)
+        return label if label in ZONE_OPTIONS else None
+
+    async def async_select_option(self, option: str) -> None:
+        """Set the offset, then the clock (the unit's displayed time moves with the offset)."""
+        self._ensure_writable()
+        await self._call(self._client.async_set_timezone(ZONE_OPTIONS[option]))
+        now = dt_util.now().replace(tzinfo=None, microsecond=0)
+        await self._call(self._client.async_set_clock(now))
+
+
+class ExtronDaylightSavingSelect(ExtronEntity, SelectEntity):
+    """The unit's daylight saving rule."""
+
+    _attr_name = "Daylight saving"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_options: ClassVar[list[str]] = list(DST_OPTIONS.values())
+    _attr_icon = "mdi:weather-sunny"
+
+    def __init__(self, entry: ExtronConfigEntry) -> None:
+        """Initialise."""
+        super().__init__(entry, "daylight_saving")
+
+    @property
+    def current_option(self) -> str | None:
+        """Return the rule."""
+        rule = self._client.info.get("dst")
+        return DST_OPTIONS.get(rule) if isinstance(rule, int) else None
+
+    async def async_select_option(self, option: str) -> None:
+        """Set the rule."""
+        await self._call(self._client.async_set_dst(DST_BY_LABEL[option]))

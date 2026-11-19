@@ -35,3 +35,6 @@ LOCK_OPTIONS = {
     2: "Mode 2 (advanced functions locked)",
 }
 GROUP_OPTIONS = {0: "None", 1: "Group 1", 2: "Group 2", 3: "Group 3", 4: "Group 4"}
+
+# The unit's daylight saving rules (Esc n CX).
+DST_OPTIONS = {0: "Off", 1: "North America", 2: "Europe", 3: "Brazil"}

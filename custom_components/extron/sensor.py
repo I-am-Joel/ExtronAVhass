@@ -22,7 +22,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import SOURCE_NONE
+from .const import DST_OPTIONS, SOURCE_NONE
 from .entity import ExtronConfigEntry, ExtronEntity
 
 STATE_SAVED = "saved"
@@ -148,7 +148,13 @@ DESCRIPTIONS: tuple[ExtronSensorDescription, ...] = (
     _text("info", "dhcp", "DHCP", "mdi:ip", convert=_on_off),
     _text("info", "clock", "Unit clock", "mdi:clock-outline"),
     _text("info", "gmt_offset", "Time zone offset", "mdi:earth"),
-    _text("info", "dst", "Daylight saving", "mdi:weather-sunny", convert=_on_off),
+    _text(
+        "info",
+        "dst",
+        "Daylight saving",
+        "mdi:weather-sunny",
+        convert=lambda value: DST_OPTIONS.get(value, "Unknown"),
+    ),
     _text(
         "info",
         "connections",

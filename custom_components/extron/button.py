@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
@@ -30,6 +30,32 @@ async def async_setup_entry(
     client = entry.runtime_data.client
     entities: list[ButtonEntity] = []
     entities.append(ExtronSyncClockButton(entry))
+    entities += [
+        ExtronResetButton(
+            entry,
+            "reset_mutes",
+            "Reset all mutes",
+            "mdi:volume-off",
+            "unmute the video and audio of every output",
+            client.async_reset_mutes,
+        ),
+        ExtronResetButton(
+            entry,
+            "reset_input_levels",
+            "Reset all input levels",
+            "mdi:tune-vertical",
+            "set every audio input level back to 0 dB",
+            client.async_reset_input_levels,
+        ),
+        ExtronResetButton(
+            entry,
+            "reset_output_volumes",
+            "Reset all output volumes",
+            "mdi:volume-high",
+            "set the volume of every output to 64 (the top of the unit's scale, full volume), which could be suddenly loud",
+            client.async_reset_output_volumes,
+        ),
+    ]
     for preset in range(1, client.preset_count + 1):
         entities.append(ExtronRecallButton(entry, preset))
         entities.append(ExtronSaveButton(entry, preset))
@@ -156,6 +182,71 @@ class ExtronClearButton(_ConfirmButton):
 
     def _action(self) -> Awaitable[None]:
         return self._client.async_clear_preset(self._preset)
+
+
+class ExtronResetButton(ExtronEntity, ButtonEntity):
+    """A milder reset of every mutes, levels or volumes at once. It always needs a second press within a few seconds."""
+
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        entry: ExtronConfigEntry,
+        key: str,
+        name: str,
+        icon: str,
+        effect: str,
+        action: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Initialise."""
+        super().__init__(entry, key)
+        self._attr_name = name
+        self._attr_icon = icon
+        self._effect = effect
+        self._action = action
+        self._armed = False
+        self._cancel: CALLBACK_TYPE | None = None
+        self._attr_entity_registry_enabled_default = self._data.show_advanced
+        self._notification_id = f"{DOMAIN}_{entry.entry_id}_{key}"
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Drop a pending confirmation timer when the entity goes away."""
+        if self._cancel is not None:
+            self._cancel()
+            self._cancel = None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Show whether the next press will go ahead."""
+        return {"armed": self._armed}
+
+    @callback
+    def _disarm(self, _now: datetime | None = None) -> None:
+        if self._cancel is not None:
+            self._cancel()
+            self._cancel = None
+        if self._armed:
+            self._armed = False
+            persistent_notification.async_dismiss(self.hass, self._notification_id)
+            self.async_write_ha_state()
+
+    async def async_press(self) -> None:
+        """Arm on the first press; act on the second."""
+        self._ensure_writable()
+        if not self._armed:
+            self._armed = True
+            self._cancel = async_call_later(self.hass, CONFIRM_SECONDS, self._disarm)
+            persistent_notification.async_create(
+                self.hass,
+                f"Press {self._attr_name!r} on {self._entry.title} again within "
+                f"{CONFIRM_SECONDS} seconds to {self._effect}.",
+                title="Extron: confirm",
+                notification_id=self._notification_id,
+            )
+            self.async_write_ha_state()
+            return
+        self._disarm()
+        await self._call(self._action())
 
 
 class ExtronSyncClockButton(ExtronEntity, ButtonEntity):

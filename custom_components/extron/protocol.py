@@ -32,6 +32,7 @@ KEEPALIVE_SECONDS = 45
 MAX_PRESETS = 32
 MIN_VOLUME, MAX_VOLUME = 0, 64
 MIN_GAIN, MAX_GAIN = -18, 24
+MIN_OFFSET_MINUTES, MAX_OFFSET_MINUTES = -12 * 60, 14 * 60  # time zone range the unit accepts
 
 ERROR_TEXT = {
     1: "invalid input number",
@@ -189,8 +190,12 @@ def parse_info(key: str, line: str) -> str | int | bool | None:
     text = line.strip()
     if not text or error_code(text) is not None:
         return None
-    if key in ("dhcp", "dst"):
+    if key == "dhcp":
         return text == "1" if text in ("0", "1") else None
+    if key == "gmt_offset":
+        return normalise_offset(text)
+    if key == "dst":
+        return int(text) if text in ("0", "1", "2", "3") else None
     if key in ("connections", "timeout"):
         if not text.isdigit():
             return None
@@ -199,6 +204,22 @@ def parse_info(key: str, line: str) -> str | int | bool | None:
         match = re.match(r"(\d+)\s+Bytes Left", text)
         return int(match.group(1)) if match else None
     return text
+
+
+def format_offset(minutes: int) -> str:
+    """Write a time zone offset the way the unit takes it (H:MM, a minus sign only when negative)."""
+    sign = "-" if minutes < 0 else ""
+    hours, mins = divmod(abs(minutes), 60)
+    return f"{sign}{hours}:{mins:02d}"
+
+
+def normalise_offset(text: str) -> str | None:
+    """Turn the unit's offset reading (00:00, +01:00, -05:00) into +HH:MM or -HH:MM, or None."""
+    match = re.fullmatch(r"([+-]?)(\d{1,2}):(\d{2})", text.strip())
+    if not match:
+        return None
+    sign = "-" if match.group(1) == "-" and (int(match.group(2)) or int(match.group(3))) else "+"
+    return f"{sign}{int(match.group(2)):02d}:{match.group(3)}"
 
 
 def parse_digits(line: str, count: int) -> list[int] | None:
@@ -221,6 +242,9 @@ _RE_VMUTE = re.compile(r"^Vmt(\d+)\*([01])$")
 _RE_AMUTE = re.compile(r"^Amt(\d+)\*([01])$")
 _RE_VMUTE_ALL = re.compile(r"^Vmt([01])$")
 _RE_AMUTE_ALL = re.compile(r"^Amt([01])$")
+_RE_ZONE = re.compile(r"^Ipz(.+)$")
+_RE_DST = re.compile(r"^Ipx([0-3])$")
+_RE_CLOCK = re.compile(r"^Ipt (.+)$")
 _RE_VOLUME = re.compile(r"^Out(\d+)\s+Vol(\d+)$")
 _RE_GAIN = re.compile(r"^In(\d+)\s+Aud([+-]\d+)$")
 _RE_TIE = re.compile(r"^Out(\d+)\s+In(\d+)\s+(Vid|Aud|All|RGB)$")
@@ -751,6 +775,46 @@ class ExtronClient:
         await self._request(f"{ESC}{when:%m/%d/%y %H:%M:%S}CT\r")
         await self._refresh_info()
 
+    async def async_set_timezone(self, minutes: int) -> None:
+        """Set the unit's time zone offset from GMT in minutes (-12:00 to +14:00)."""
+        self._check_writable()
+        if not MIN_OFFSET_MINUTES <= minutes <= MAX_OFFSET_MINUTES:
+            raise ValueError("The time zone offset must be between -12:00 and +14:00")
+        reply = await self._request(f"{ESC}{format_offset(minutes)}CZ\r")
+        if not reply.strip().startswith("Ipz"):
+            raise ExtronError(f"Unexpected reply to a time zone change: {reply.strip()}")
+        await self._refresh_info()
+
+    async def async_set_dst(self, rule: int) -> None:
+        """Set the daylight saving rule: 0 off, 1 North America, 2 Europe, 3 Brazil."""
+        self._check_writable()
+        if rule not in (0, 1, 2, 3):
+            raise ValueError("The daylight saving rule must be 0, 1, 2 or 3")
+        reply = await self._request(f"{ESC}{rule}CX\r")
+        if reply.strip() != f"Ipx{rule}":
+            raise ExtronError(f"Unexpected reply to a daylight saving change: {reply.strip()}")
+        await self._refresh_info()
+
+    async def _reset(self, command: str, expected: str) -> None:
+        """Send one of the milder reset commands. The unit does not announce these, so read it all again."""
+        self._check_writable()
+        reply = await self._request(f"{ESC}{command}\r")
+        if reply.strip() != expected:
+            raise ExtronError(f"Unexpected reply to the reset: {reply.strip()}")
+        await self._refresh_core()
+
+    async def async_reset_mutes(self) -> None:
+        """Unmute the video and audio of every output (Esc ZZ)."""
+        await self._reset("ZZ", "Zpz")
+
+    async def async_reset_input_levels(self) -> None:
+        """Set every audio input level back to 0 dB (Esc ZA)."""
+        await self._reset("ZA", "Zpa")
+
+    async def async_reset_output_volumes(self) -> None:
+        """Set every audio output volume back to the unit's default (Esc ZV)."""
+        await self._reset("ZV", "Zpv")
+
     def _check_preset(self, preset: int) -> None:
         if not 1 <= preset <= self.preset_count:
             raise ValueError(f"Preset {preset} does not exist on this unit")
@@ -947,6 +1011,14 @@ class ExtronClient:
         elif match := _RE_NAME_OUT.match(line):
             number = int(match.group(1))
             self.out_names[number] = _make_name(match.group(2), f"Output {number:02d}")
+        elif match := _RE_ZONE.match(line):
+            offset = normalise_offset(match.group(1))
+            if offset is not None:
+                self.info["gmt_offset"] = offset
+        elif match := _RE_DST.match(line):
+            self.info["dst"] = int(match.group(1))
+        elif match := _RE_CLOCK.match(line):
+            self.info["clock"] = match.group(1)
         elif line == "Qik" or _RE_RECALL.match(line):
             self._spawn(self._refresh_ties())
             changed = False

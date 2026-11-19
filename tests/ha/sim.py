@@ -48,6 +48,8 @@ class Sim:
         self.server: asyncio.AbstractServer | None = None
         self.port = 0
         self.clock = "Thu, 19 Nov 2026 16:23:07"
+        self.zone = "-12:00"  # as the unit reads it back: 00:00, +01:00, -05:00
+        self.dst = 0
         self.mute_replies = False  # for the "unit stops answering" test
         self.video[1] = 1
         self.audio[1] = 1
@@ -58,7 +60,7 @@ class Sim:
         for line in self.log:
             if line.startswith("ESC"):
                 body = line[3:]
-                if re.fullmatch(r"\d+ZG|\d{4,}[IO]|\+Q.*|[\d/ :]+CT", body):
+                if re.fullmatch(r"\d+ZG|\d{4,}[IO]|\+Q.*|[\d/ :]+CT|-?\d+:\d\d[C]Z|[0-3]CX|Z[ZAV]", body):
                     found.append(line)
             elif (
                 re.fullmatch(
@@ -337,13 +339,40 @@ class Sim:
             "DH": "0",
             "CC": "006",
             "CT": self.clock,
-            "CZ": "-12:00",
-            "CX": "0",
+            "CZ": self.zone,
+            "CX": str(self.dst),
             "0TC": "00030",
             "1CP": "9600,N,8,1",
         }
         if body in info:
             return self.send(conn, info[body])
+        if m := re.fullmatch(r"(-?)(\d{1,2}):(\d\d)CZ", body):
+            hours, mins = int(m.group(2)), int(m.group(3))
+            total = (-1 if m.group(1) else 1) * (hours * 60 + mins)
+            if mins > 59 or not -720 <= total <= 840:
+                return self.err(conn, 13)
+            sign = "-" if total < 0 else "+" if total > 0 else ""
+            self.zone = f"{sign}{abs(total) // 60:02d}:{abs(total) % 60:02d}"
+            self.send(conn, f"Ipz{self.zone}")
+            self.event(f"Ipz{self.zone}", conn)
+            return
+        if m := re.fullmatch(r"(\d)CX", body):
+            if int(m.group(1)) > 3:
+                return self.err(conn, 13)
+            self.dst = int(m.group(1))
+            self.send(conn, f"Ipx{self.dst}")
+            self.event(f"Ipx{self.dst}", conn)
+            return
+        if body in ("ZZ", "ZA", "ZV"):
+            # The unit answers the command and says nothing to other connections.
+            for o in range(1, self.n + 1):
+                if body == "ZZ":
+                    self.vmute[o] = self.amute[o] = False
+                elif body == "ZA":
+                    self.gain[o] = 0
+                else:
+                    self.volume[o] = 64
+            return self.send(conn, {"ZZ": "Zpz", "ZA": "Zpa", "ZV": "Zpv"}[body])
         if body == "DF":
             conn.writer.write(b"1245184 Bytes Left\r\n\r\n")
             return
