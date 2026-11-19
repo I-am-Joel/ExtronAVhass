@@ -13,6 +13,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
+from homeassistant.util import dt as dt_util
 
 from .const import CONFIRM_SECONDS, DOMAIN
 from .entity import ExtronConfigEntry, ExtronEntity
@@ -28,6 +29,7 @@ async def async_setup_entry(
     """Set up the preset buttons."""
     client = entry.runtime_data.client
     entities: list[ButtonEntity] = []
+    entities.append(ExtronSyncClockButton(entry))
     for preset in range(1, client.preset_count + 1):
         entities.append(ExtronRecallButton(entry, preset))
         entities.append(ExtronSaveButton(entry, preset))
@@ -62,7 +64,6 @@ class _ConfirmButton(ExtronEntity, ButtonEntity):
     """A button that changes a preset and needs a second press within a few seconds if it holds something."""
 
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_entity_registry_enabled_default = False
     _verb = ""
     _verb_past = ""
 
@@ -71,6 +72,7 @@ class _ConfirmButton(ExtronEntity, ButtonEntity):
         super().__init__(entry, f"preset_{preset}_{key}")
         self._preset = preset
         self._armed = False
+        self._attr_entity_registry_enabled_default = self._data.show_advanced
         self._cancel: CALLBACK_TYPE | None = None
         self._notification_id = f"{DOMAIN}_{entry.entry_id}_{key}_{preset}"
 
@@ -154,3 +156,21 @@ class ExtronClearButton(_ConfirmButton):
 
     def _action(self) -> Awaitable[None]:
         return self._client.async_clear_preset(self._preset)
+
+
+class ExtronSyncClockButton(ExtronEntity, ButtonEntity):
+    """Set the unit's clock to Home Assistant's local time."""
+
+    _attr_name = "Sync clock"
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:clock-check-outline"
+
+    def __init__(self, entry: ExtronConfigEntry) -> None:
+        """Initialise."""
+        super().__init__(entry, "sync_clock")
+
+    async def async_press(self) -> None:
+        """Set the clock."""
+        self._ensure_writable()
+        now = dt_util.now().replace(tzinfo=None, microsecond=0)
+        await self._call(self._client.async_set_clock(now))

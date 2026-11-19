@@ -47,6 +47,7 @@ class Sim:
         self.log: list[str] = []
         self.server: asyncio.AbstractServer | None = None
         self.port = 0
+        self.clock = "Thu, 19 Nov 2026 16:23:07"
         self.mute_replies = False  # for the "unit stops answering" test
         self.video[1] = 1
         self.audio[1] = 1
@@ -57,10 +58,12 @@ class Sim:
         for line in self.log:
             if line.startswith("ESC"):
                 body = line[3:]
-                if re.fullmatch(r"\d+ZG|\d{4,}[IO]", body):
+                if re.fullmatch(r"\d+ZG|\d{4,}[IO]|\+Q.*|[\d/ :]+CT", body):
                     found.append(line)
             elif (
-                re.fullmatch(r"\d+\*\d+[!%$&BZVGg]|[01]\*[BZ]|\dX|\d+[,.]", line)
+                re.fullmatch(
+                    r"\d+\*\d+[!%$&BZVGg]|[01]\*[BZ]|\d+\*[!%$]|\dX|\d+[,.]", line
+                )
                 and line not in ("0X", "1X", "2X")
                 or re.fullmatch(r"\dX", line)
                 and line[0] in "012"
@@ -148,7 +151,7 @@ class Sim:
                 self.esc(conn, body)
                 continue
             match = re.match(
-                r"(\d+)\*(\d+)([!%$&BZVGg])|(\d+)([!%$&BZVGg])|(\d+)([,.X])|(Q|I|X)|(\d+)\*([!%$BZ])",
+                r"(\d+)\*(\d+)([!%$&BZVGg])|(\d+)([!%$&BZVGg])|(\d+)([,.X])|(Q|I|X|S)|(\d+)\*([!%$BZ])",
                 conn.buffer,
             )
             if not match:
@@ -170,6 +173,11 @@ class Sim:
         """Handle a plain (no-escape) command."""
         if t == "Q":
             self.send(conn, "Ver01*2.03" if self.v3(conn) else "2.03")
+            return
+        if t == "S":
+            self.send(
+                conn, "5.06 3.32 2.51 11.15 -5.04 -11.98 11.52 71.60 1081 1095 1 1"
+            )
             return
         if t == "I":
             self.send(conn, f"V{self.n}X{self.n} A{self.n}X{self.n}")
@@ -194,6 +202,19 @@ class Sim:
             tag = "Vmt" if m.group(2) == "B" else "Amt"
             self.send(conn, f"{tag}{m.group(1)}")
             self.event(f"{tag}{m.group(1)}", conn)
+            return
+        if m := re.fullmatch(r"(\d+)\*([!%$])", t):
+            if int(m.group(1)) > self.n:
+                return self.err(conn, 1)
+            kind = {"!": "All", "%": "Vid", "$": "Aud"}[m.group(2)]
+            for o in range(1, self.n + 1):
+                if kind in ("All", "Vid"):
+                    self.video[o] = int(m.group(1))
+                if kind in ("All", "Aud"):
+                    self.audio[o] = int(m.group(1))
+            line = f"In{int(m.group(1)):02d} {kind}"
+            self.send(conn, line)
+            self.event(line, conn)
             return
         if m := re.fullmatch(r"(\d+)\*(\d+)([!%$&])", t):
             return self.tie(conn, int(m.group(1)), int(m.group(2)), m.group(3))
@@ -308,6 +329,41 @@ class Sim:
         """Handle an escape command."""
         if body == "CN":
             return self.send(conn, "Crosspoint-MAV-00-00-01")
+        info = {
+            "CI": "192.168.0.254",
+            "CS": "255.255.255.0",
+            "CG": "0.0.0.0",
+            "CH": "00-05-A6-00-00-01",
+            "DH": "0",
+            "CC": "006",
+            "CT": self.clock,
+            "CZ": "-12:00",
+            "CX": "0",
+            "0TC": "00030",
+            "1CP": "9600,N,8,1",
+        }
+        if body in info:
+            return self.send(conn, info[body])
+        if body == "DF":
+            conn.writer.write(b"1245184 Bytes Left\r\n\r\n")
+            return
+        if m := re.fullmatch(r"(\d\d)/(\d\d)/(\d\d) (\d\d:\d\d:\d\d)CT", body):
+            if int(m.group(1)) > 12 or int(m.group(2)) > 31:
+                return self.err(conn, 13)
+            self.clock = f"Thu, {m.group(2)} Nov 20{m.group(3)} {m.group(4)}"
+            return self.send(conn, f"Ipt {self.clock}")
+        if body.startswith("+Q"):
+            for i, o, sym in re.findall(r"(\d+)\*(\d+)([!%$])", body[2:]):
+                i, o = int(i), int(o)
+                if i > self.n or not 1 <= o <= self.n:
+                    continue
+                if sym in "!%":
+                    self.video[o] = i
+                if sym in "!$":
+                    self.audio[o] = i
+            self.send(conn, "Qik")
+            self.event("Qik", conn)
+            return
         if body == "CV":
             return self.send(conn, str(conn.verbose))
         if m := re.fullmatch(r"([0-3])CV", body):

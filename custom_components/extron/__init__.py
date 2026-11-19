@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -26,6 +28,7 @@ from .const import (
     CONF_PORT,
     CONF_READ_ONLY,
     CONF_REFRESH_SECONDS,
+    CONF_SHOW_ADVANCED,
     CONF_UNIT_NAME,
     DEFAULT_PORT,
     DEFAULT_REFRESH,
@@ -43,6 +46,7 @@ CONFIG_SCHEMA: vol.Schema = cv.config_entry_only_config_schema(DOMAIN)
 PLATFORMS = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
+    Platform.MEDIA_PLAYER,
     Platform.NUMBER,
     Platform.SELECT,
     Platform.SENSOR,
@@ -143,6 +147,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ExtronConfigEntry) -> bo
         out_audio=out_audio,
         read_only=client.read_only,
         applied_options=_without_refresh(options),
+        show_advanced=bool(options.get(CONF_SHOW_ADVANCED, False)),
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_reload))
@@ -153,8 +158,33 @@ def _without_refresh(options: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in options.items() if k != CONF_REFRESH_SECONDS}
 
 
+# Entities that are off by default: the group selects and the save and clear preset buttons.
+ADVANCED_ID = re.compile(r"_(?:in|out)_\d+_group$|_preset_\d+_(?:save|clear)$")
+
+
+@callback
+def sync_advanced(hass: HomeAssistant, entry: ExtronConfigEntry) -> None:
+    """Switch the advanced entities on or off to match the option (only when the option changed)."""
+    registry = er.async_get(hass)
+    show = bool(entry.options.get(CONF_SHOW_ADVANCED, False))
+    for item in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if not ADVANCED_ID.search(item.unique_id):
+            continue
+        if show and item.disabled_by is er.RegistryEntryDisabler.INTEGRATION:
+            registry.async_update_entity(item.entity_id, disabled_by=None)
+        elif not show and item.disabled_by is None:
+            registry.async_update_entity(
+                item.entity_id, disabled_by=er.RegistryEntryDisabler.INTEGRATION
+            )
+
+
 async def _reload(hass: HomeAssistant, entry: ExtronConfigEntry) -> None:
     """Reload after options or reconfiguration change."""
+    data = getattr(entry, "runtime_data", None)
+    if data is not None and data.show_advanced != bool(
+        entry.options.get(CONF_SHOW_ADVANCED, False)
+    ):
+        sync_advanced(hass, entry)
     await hass.config_entries.async_reload(entry.entry_id)
 
 

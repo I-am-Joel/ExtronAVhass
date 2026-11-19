@@ -16,6 +16,7 @@ CONF_AUDIO_INPUT_NAMES = "audio_input_names"
 CONF_OUTPUT_NAMES = "output_names"
 CONF_AUDIO_OUTPUT_NAMES = "audio_output_names"
 CONF_REFRESH_SECONDS = "refresh_seconds"
+CONF_SHOW_ADVANCED = "show_advanced"
 
 DEFAULT_PORT = 23
 DEFAULT_REFRESH = 60

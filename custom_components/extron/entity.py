@@ -29,6 +29,7 @@ class ExtronData:
     out_audio: list[str]
     read_only: bool = False
     applied_options: dict = field(default_factory=dict)
+    show_advanced: bool = False
 
 
 type ExtronConfigEntry = ConfigEntry[ExtronData]

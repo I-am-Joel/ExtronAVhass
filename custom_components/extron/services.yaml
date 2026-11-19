@@ -1,0 +1,28 @@
+route:
+  target:
+    entity:
+      integration: extron
+      domain: media_player
+  fields:
+    input:
+      required: true
+      example: "Blu-ray"
+      selector:
+        text:
+    outputs:
+      required: true
+      example: '["Lounge", "Kitchen"]'
+      selector:
+        text:
+          multiple: true
+    mode:
+      default: both
+      selector:
+        select:
+          options:
+            - label: Video and audio
+              value: both
+            - label: Video only
+              value: video
+            - label: Audio only
+              value: audio

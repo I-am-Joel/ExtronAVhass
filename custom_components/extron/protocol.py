@@ -133,6 +133,74 @@ def parse_gain(line: str) -> int | None:
     return int(text) if re.fullmatch(r"[+-]\d+", text) else None
 
 
+STATUS_KEYS = (
+    "v5",
+    "v3_3",
+    "v2_5",
+    "fan_v",
+    "v_m5",
+    "v_m12",
+    "v12",
+    "temp_f",
+    "fan1",
+    "fan2",
+    "psu1",
+    "psu2",
+)
+
+
+def parse_status(line: str) -> dict[str, float]:
+    """Parse the ``S`` reply of a MAV Plus (12 values: rails, temperature in F, fans, supplies).
+
+    Units up to the 1616 answer with a different, shorter list; that is not understood yet,
+    so nothing is returned for it.
+    """
+    tokens = line.split()
+    if len(tokens) != len(STATUS_KEYS):
+        return {}
+    try:
+        numbers = [float(t) for t in tokens]
+    except ValueError:
+        return {}
+    return dict(zip(STATUS_KEYS, numbers, strict=True))
+
+
+# Unit information, read with escape commands. The free-space reply is last because it is
+# followed by a blank line.
+INFO_COMMANDS = (
+    ("unit_name", "CN"),
+    ("ip", "CI"),
+    ("subnet", "CS"),
+    ("gateway", "CG"),
+    ("mac", "CH"),
+    ("dhcp", "DH"),
+    ("connections", "CC"),
+    ("clock", "CT"),
+    ("gmt_offset", "CZ"),
+    ("dst", "CX"),
+    ("timeout", "0TC"),
+    ("serial", "1CP"),
+    ("free_space", "DF"),
+)
+
+
+def parse_info(key: str, line: str) -> str | int | bool | None:
+    """Turn one information reply into a useful value (None if it is not understood)."""
+    text = line.strip()
+    if not text or error_code(text) is not None:
+        return None
+    if key in ("dhcp", "dst"):
+        return text == "1" if text in ("0", "1") else None
+    if key in ("connections", "timeout"):
+        if not text.isdigit():
+            return None
+        return int(text) * (10 if key == "timeout" else 1)
+    if key == "free_space":
+        match = re.match(r"(\d+)\s+Bytes Left", text)
+        return int(match.group(1)) if match else None
+    return text
+
+
 def parse_digits(line: str, count: int) -> list[int] | None:
     """Parse a run of single digits (mutes, groups), tolerating commas, into ``count`` numbers."""
     digits = re.sub(r"[^0-9]", "", line)
@@ -156,6 +224,7 @@ _RE_AMUTE_ALL = re.compile(r"^Amt([01])$")
 _RE_VOLUME = re.compile(r"^Out(\d+)\s+Vol(\d+)$")
 _RE_GAIN = re.compile(r"^In(\d+)\s+Aud([+-]\d+)$")
 _RE_TIE = re.compile(r"^Out(\d+)\s+In(\d+)\s+(Vid|Aud|All|RGB)$")
+_RE_TIE_ALL = re.compile(r"^In(\d+)\s+(Vid|Aud|All|RGB)$")
 _RE_LOCK = re.compile(r"^Exe([012])$")
 _RE_NAME_IN = re.compile(r"^Nmi(\d+),(.*)$")
 _RE_NAME_OUT = re.compile(r"^Nmo(\d+),(.*)$")
@@ -399,6 +468,8 @@ class ExtronClient:
         self.groups_out: list[int] | None = None
         self.presets: dict[int, Preset] = {}
         self.preset_count = 0
+        self.status: dict[str, float] = {}
+        self.info: dict[str, str | int | bool] = {}
         self.banner: dict[str, str] = {}
         self.privilege = ""
         self.last_reply: datetime | None = None
@@ -488,7 +559,9 @@ class ExtronClient:
 
     # -- requests ------------------------------------------------------------------
 
-    async def _request_many(self, wires: list[str]) -> list[str]:
+    async def _request_many(
+        self, wires: list[str], settle: frozenset[str] = frozenset()
+    ) -> list[str]:
         """Send commands one at a time and return one reply line for each.
 
         One at a time (never several in one write) is the way every command was tested
@@ -509,6 +582,10 @@ class ExtronClient:
                     self._spawn(self._close_links())
                     raise ExtronTimeoutError("No reply from the unit")
                 lines.append(line)
+                if wire in settle:
+                    # This reply is followed by a blank line: swallow it so it is not
+                    # mistaken for the answer to the next command.
+                    await link.read_line(0.2, keep_blank=True)
         self.last_reply = datetime.now(UTC)
         return lines
 
@@ -609,6 +686,70 @@ class ExtronClient:
         else:
             self.groups_in = updated
         self._notify()
+
+    async def async_set_tie_all(
+        self, input_number: int, *, video: bool = True, audio: bool = True
+    ) -> None:
+        """Tie one input (0 = none) to every output for video, audio or both."""
+        self._check_writable()
+        self._check_input(input_number, allow_zero=True)
+        if not (video or audio):
+            raise ValueError("Choose video, audio or both")
+        symbol = "!" if video and audio else "%" if video else "$"
+        await self._request(f"{input_number}*{symbol}")
+        for output in range(1, self.outputs + 1):
+            if video:
+                self.video[output] = input_number
+            if audio:
+                self.audio[output] = input_number
+        self._notify()
+
+    async def async_route(
+        self,
+        input_number: int,
+        outputs: list[int],
+        *,
+        video: bool = True,
+        audio: bool = True,
+    ) -> None:
+        """Tie one input (0 = none) to a chosen set of outputs, in a single command."""
+        self._check_writable()
+        self._check_input(input_number, allow_zero=True)
+        if not (video or audio):
+            raise ValueError("Choose video, audio or both")
+        chosen = sorted(set(outputs))
+        if not chosen:
+            raise ValueError("Choose at least one output")
+        for output in chosen:
+            self._check_output(output)
+        if len(chosen) == self.outputs:
+            await self.async_set_tie_all(input_number, video=video, audio=audio)
+            return
+        if len(chosen) == 1:
+            await self.async_set_tie(chosen[0], input_number, video=video, audio=audio)
+            return
+        symbol = "!" if video and audio else "%" if video else "$"
+        entries = "".join(f"{input_number}*{o}{symbol}" for o in chosen)
+        reply = await self._request(f"{ESC}+Q{entries}\r")
+        if reply.strip() != "Qik":
+            raise ExtronError(f"Unexpected reply to a multiple tie: {reply.strip()}")
+        # The unit only says "Qik" for this, so read the ties back.
+        await self._refresh_ties()
+
+    async def async_set_mute_all(self, *, video: bool, muted: bool) -> None:
+        """Mute or unmute the video or the audio of every output."""
+        self._check_writable()
+        await self._request(f"{int(muted)}*{'B' if video else 'Z'}")
+        table = self.video_mute if video else self.audio_mute
+        for output in range(1, self.outputs + 1):
+            table[output] = muted
+        self._notify()
+
+    async def async_set_clock(self, when: datetime) -> None:
+        """Set the unit's clock (local time, as the unit shows it)."""
+        self._check_writable()
+        await self._request(f"{ESC}{when:%m/%d/%y %H:%M:%S}CT\r")
+        await self._refresh_info()
 
     def _check_preset(self, preset: int) -> None:
         if not 1 <= preset <= self.preset_count:
@@ -713,6 +854,18 @@ class ExtronClient:
         )
         self._notify()
 
+    async def _refresh_info(self) -> None:
+        """Read the power and temperature status and the unit's information (all optional)."""
+        wires = ["S"] + [f"{ESC}{cmd}\r" for _key, cmd in INFO_COMMANDS]
+        lines = await self._request_many(wires, settle=frozenset({wires[-1]}))
+        if error_code(lines[0]) is None:
+            self.status = parse_status(lines[0])
+        for (key, _cmd), line in zip(INFO_COMMANDS, lines[1:], strict=True):
+            value = parse_info(key, line)
+            if value is not None:
+                self.info[key] = value
+        self._notify()
+
     async def _refresh_names(self) -> None:
         wires = [f"{ESC}{i}NI\r" for i in range(1, self.inputs + 1)]
         wires += [f"{ESC}{o}NO\r" for o in range(1, self.outputs + 1)]
@@ -779,6 +932,13 @@ class ExtronClient:
                 self.video[output] = number
             if kind in ("Aud", "All"):
                 self.audio[output] = number
+        elif match := _RE_TIE_ALL.match(line):
+            number, kind = int(match.group(1)), match.group(2)
+            for output in range(1, self.outputs + 1):
+                if kind in ("Vid", "All", "RGB"):
+                    self.video[output] = number
+                if kind in ("Aud", "All"):
+                    self.audio[output] = number
         elif match := _RE_LOCK.match(line):
             self.lock_mode = int(match.group(1))
         elif match := _RE_NAME_IN.match(line):
@@ -841,6 +1001,7 @@ class ExtronClient:
             await self._refresh_core()
             await self._refresh_names()
             await self.async_refresh_presets()
+            await self._refresh_info()
             self._ready.set()
             self._set_available(True)
             loop = asyncio.get_running_loop()
@@ -872,6 +1033,7 @@ class ExtronClient:
                     or now - last_full >= self._refresh_interval
                 ):
                     await self._refresh_core()
+                    await self._refresh_info()
                     last_full = last_keepalive = loop.time()
                 elif now - last_keepalive >= KEEPALIVE_SECONDS:
                     await self._request("Q")

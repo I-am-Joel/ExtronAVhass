@@ -5,11 +5,11 @@ Assistant, with two-way status: changes made on the unit's front panel, its
 web page or another controller appear in Home Assistant straight away, and
 changes made in Home Assistant are sent to the unit.
 
-> **Status:** first release (0.1.0). Written from a live probe of one unit, an
-> **Extron MAV Plus 2424 AV** (firmware 2.03), and tested against a simulation
-> of it. It has not yet run against a real unit inside Home Assistant. Other
-> CrossPoint and MAV sizes use the same instruction set and are expected to work,
-> but have not been tried.
+> **Status:** 0.1.1. Written from live probes of one unit, an **Extron MAV Plus
+> 2424 AV** (firmware 2.03), and tested against a simulation of it. 0.1.0 ran on
+> that unit; the 0.1.1 additions have only been tested against the simulation.
+> Other CrossPoint and MAV sizes use the same instruction set and are expected
+> to work, but have not been tried.
 
 ## What you get
 
@@ -27,6 +27,13 @@ For each switcher you add, one device with:
 | Save preset / Clear preset | `button` | Off by default. See [Presets](#presets). |
 | Front panel lock | `select` | Off, Mode 1 or Mode 2 (diagnostic category). |
 | *Input* / *Output* Group | `select` | Off by default. The unit's I/O group (see [Limitations](#limitations)). |
+| All outputs | `media_player` | Choose one input (or **None**) for **every** output at once, video and audio. Shows **Mixed** when the outputs differ. |
+| Mute all video / Mute all audio | `switch` | On when every output is muted; turning it on or off mutes or unmutes them all. |
+| Routing summary | `sensor` | "24 of 24 outputs routed"; the attributes list every output's video and audio source, and every input's outputs. |
+| Sync clock | `button` | Sets the unit's clock to Home Assistant's local time (configuration category). |
+| Temperature, Fan 1 / 2 speed, voltage rails | `sensor` | Diagnostic. Temperature in °C, fans in rpm. |
+| Primary / Secondary power supply | `binary_sensor` | Diagnostic. **On means a fault.** |
+| Firmware, part number, unit name, IP address, subnet mask, gateway, MAC address, DHCP, unit clock, time zone offset, daylight saving, open connections, connection timeout, serial port settings, free file space, inputs, outputs, outputs with a source | `sensor` | Diagnostic information, refreshed with each full refresh. |
 | Connection | `binary_sensor` | On while the unit is answering; its attributes show the firmware, part number, login level and the latest problem. |
 
 Names come from the unit. Audio and video inputs and outputs can each be given
@@ -54,6 +61,33 @@ none. The unit must have Ethernet; the front-panel RS-232 jack is not used.
 * With an administrator password the integration can change anything the front
   panel can, including presets and the lock. It never sends a reset command and
   never changes a password or the network settings.
+
+## Route action
+
+`extron.route` ties one input to several named outputs in a single command.
+Target the unit's **All outputs** media player and give:
+
+```yaml
+action: extron.route
+target:
+  entity_id: media_player.<your_unit>_all_outputs
+data:
+  input: Blu-ray          # an input name or number, or None
+  outputs:                # output names or numbers
+    - Lounge
+    - Kitchen
+  mode: both              # both (default), video or audio
+```
+
+Names are not case sensitive. A name that is not recognised gives an error and
+nothing is changed. A read-only unit refuses it.
+
+## Advanced controls
+
+The input and output **Group** selects and the **Save / Clear preset** buttons
+are off by default. **Configure > Show advanced controls** turns them all on
+together; unticking turns them all off again (including any you had switched on
+by hand). Home Assistant reloads the unit about 30 seconds after enabling.
 
 ## Presets
 
@@ -93,6 +127,11 @@ the integration reconnects by itself.
   Home Assistant ignore them.
 * **Recall** restores the preset's ties only.
 * **Volume** is shown on the unit's own 0 to 64 scale.
+* **Clock:** the unit's time-zone offset is not changed. Sync clock writes local
+  time, which is what the unit then displays.
+* **Diagnostics on smaller units:** units up to the 1616 reply to the status
+  command in a different, shorter form that is not understood yet, so they get
+  no temperature, fan, power or voltage sensors until it is probed.
 * The password prompt, user-level logins and sizes other than 24 x 24 have not
   been tried on a real unit.
 

@@ -49,6 +49,12 @@ async def async_get_config_entry_diagnostics(
         ),
         "model": entry.runtime_data.model_name,
         "banner": dict(client.banner),
+        "status": dict(client.status),
+        "info": {
+            k: v
+            for k, v in client.info.items()
+            if k not in ("ip", "subnet", "gateway", "mac", "unit_name")
+        },
         "login": client.privilege,
         "state": {
             "available": client.available,

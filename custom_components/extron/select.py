@@ -122,7 +122,6 @@ class ExtronGroupSelect(ExtronEntity, SelectEntity):
     """An input's or output's I/O group (limits which ties the front panel allows; SIS is unaffected)."""
 
     _attr_entity_category = EntityCategory.CONFIG
-    _attr_entity_registry_enabled_default = False
     _attr_options: ClassVar[list[str]] = list(GROUP_OPTIONS.values())
     _attr_icon = "mdi:group"
 
@@ -133,6 +132,7 @@ class ExtronGroupSelect(ExtronEntity, SelectEntity):
         super().__init__(entry, f"{'out' if is_output else 'in'}_{number}_group")
         self._number = number
         self._is_output = is_output
+        self._attr_entity_registry_enabled_default = self._data.show_advanced
         names = self._data.out_base if is_output else self._data.in_base
         self._attr_name = f"{names[number - 1]} Group"
 

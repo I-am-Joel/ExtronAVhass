@@ -37,6 +37,7 @@ from .const import (
     CONF_PORT,
     CONF_READ_ONLY,
     CONF_REFRESH_SECONDS,
+    CONF_SHOW_ADVANCED,
     CONF_UNIT_NAME,
     DEFAULT_PORT,
     DOMAIN,
@@ -271,6 +272,7 @@ class ExtronOptionsFlow(OptionsFlow):
                     ]
             if not errors:
                 saved[CONF_REFRESH_SECONDS] = int(user_input[CONF_REFRESH_SECONDS])
+                saved[CONF_SHOW_ADVANCED] = bool(user_input[CONF_SHOW_ADVANCED])
                 return self.async_create_entry(data=saved)
         typed = user_input or {}
         multiline = TextSelector(TextSelectorConfig(multiline=True))
@@ -289,6 +291,14 @@ class ExtronOptionsFlow(OptionsFlow):
                 min=MIN_REFRESH, max=MAX_REFRESH, step=1, mode=NumberSelectorMode.BOX
             )
         )
+        fields[
+            vol.Required(
+                CONF_SHOW_ADVANCED,
+                default=typed.get(
+                    CONF_SHOW_ADVANCED, bool(entry.options.get(CONF_SHOW_ADVANCED))
+                ),
+            )
+        ] = BooleanSelector()
         return self.async_show_form(
             step_id="init", data_schema=vol.Schema(fields), errors=errors
         )

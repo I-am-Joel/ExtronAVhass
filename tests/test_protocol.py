@@ -325,3 +325,18 @@ async def test_silent_unit_is_noticed():
     finally:
         await client.async_stop()
         await sim.stop()
+
+
+def test_parse_status_and_info() -> None:
+    """The S reply and the unit-information replies."""
+    from custom_components.extron.protocol import parse_info, parse_status
+
+    status = parse_status("5.06 3.32 2.51 11.15 -5.04 -11.98 11.52 71.60 1081 1095 1 1")
+    assert status["temp_f"] == 71.6 and status["psu2"] == 1 and status["fan1"] == 1081
+    assert parse_status("3.3 5.0 -5 15 -15 70") == {}
+    assert parse_status("E10") == {}
+    assert parse_info("timeout", "00030") == 300
+    assert parse_info("connections", "006") == 6
+    assert parse_info("free_space", "1245184 Bytes Left") == 1245184
+    assert parse_info("dhcp", "0") is False
+    assert parse_info("ip", "E13") is None
