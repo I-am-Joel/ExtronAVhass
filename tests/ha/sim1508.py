@@ -20,7 +20,9 @@ class Sim1508:
         self.input = 1
         self.pip = 0
         self.pip_input = 0
-        self.standard = 0
+        self.standard: int | None = 0  # None: the unit sends a dash (an active digital or RGB signal)
+        self.silent: set[str] = set()  # commands the unit never answers
+        self.odd: dict[str, str] = {}  # commands answered with something unexpected
         self.vmute = 1
         self.amute = 0
         self.freeze = 0
@@ -107,8 +109,13 @@ class Sim1508:
     async def command(self, writer: asyncio.StreamWriter, text: str) -> None:
         """Answer one command."""
         say = self.say
+        if text in self.silent:
+            return None
+        if text in self.odd:
+            return say(writer, self.odd[text])
         if text == "I":
-            return say(writer, f"Chn{self.input} Pch{self.pip_input} Std{self.standard}")
+            std = "-" if self.standard is None else self.standard
+            return say(writer, f"Chn{self.input} Pch{self.pip_input} Std{std}")
         if text == "N":
             return say(writer, "60-569-01")
         if text == "Q":

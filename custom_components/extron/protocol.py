@@ -29,6 +29,7 @@ ESC = "\x1b"
 IAC, DONT, DO, WONT, WILL, SB, SE = 255, 254, 253, 252, 251, 250, 240
 
 KEEPALIVE_SECONDS = 45
+QUARANTINE_AFTER = 2  # readings that got no answer this many times in a row are left out
 MAX_PRESETS = 32
 MIN_VOLUME, MAX_VOLUME = 0, 64
 MIN_GAIN, MAX_GAIN = -18, 24
@@ -603,6 +604,8 @@ class ExtronClient:
         self._cmd: ExtronLink | None = None
         self._evt: ExtronLink | None = None
         self._lock = asyncio.Lock()
+        self._strikes: dict[str, int] = {}
+        self.quarantined: set[str] = set()
         self._single = False  # one stream only (a serial unit): announcements share it with the answers
         self._inbox: asyncio.Queue[str] | None = None
         self._listeners: list[Callable[[], None]] = []
@@ -715,10 +718,30 @@ class ExtronClient:
 
     # -- requests ------------------------------------------------------------------
 
+    def _skip(self, wire: str, skip_with: str | None) -> bool:
+        """Whether a read that has gone unanswered repeatedly is left out (answered with ``skip_with``)."""
+        if skip_with is None or self._strikes.get(wire, 0) < QUARANTINE_AFTER:
+            return False
+        if wire not in self.quarantined:
+            self.quarantined.add(wire)
+            _LOGGER.warning(
+                "Command %r got no reply %d times in a row: leaving it out of the readings",
+                wire,
+                QUARANTINE_AFTER,
+            )
+        return True
+
     async def _request_many(
-        self, wires: list[str], settle: frozenset[str] = frozenset()
+        self,
+        wires: list[str],
+        settle: frozenset[str] = frozenset(),
+        skip_with: str | None = None,
     ) -> list[str]:
         """Send commands one at a time and return one reply line for each.
+
+        A read that has gone unanswered QUARANTINE_AFTER times in a row (over reconnections) is
+        not sent again and is answered with ``skip_with``, so one command a unit never answers
+        cannot keep it unavailable for good. Only readings pass ``skip_with``.
 
         One at a time (never several in one write) is the way every command was tested
         against a real unit, and a reply takes only about 15 ms.
@@ -727,10 +750,13 @@ class ExtronClient:
         if link is None:
             raise ExtronConnectionError("Not connected")
         if self._single:
-            return await self._request_many_single(wires)
+            return await self._request_many_single(wires, skip_with)
         async with self._lock:
             lines: list[str] = []
             for wire in wires:
+                if self._skip(wire, skip_with):
+                    lines.append(skip_with or "")
+                    continue
                 link.drain()
                 try:
                     await link.write(wire)
@@ -740,10 +766,12 @@ class ExtronClient:
                     self._spawn(self._close_links())
                     raise
                 if line is None:
+                    self._strikes[wire] = self._strikes.get(wire, 0) + 1
                     self._record_error("No reply from the unit")
                     # A late reply would put every later answer out of step: start again.
                     self._spawn(self._close_links())
                     raise ExtronTimeoutError("No reply from the unit")
+                self._strikes.pop(wire, None)
                 lines.append(line)
                 if wire in settle:
                     # This reply is followed by a blank line: swallow it so it is not
@@ -752,7 +780,9 @@ class ExtronClient:
         self.last_reply = datetime.now(UTC)
         return lines
 
-    async def _request_many_single(self, wires: list[str]) -> list[str]:
+    async def _request_many_single(
+        self, wires: list[str], skip_with: str | None = None
+    ) -> list[str]:
         """As ``_request_many`` on a single stream: lines the unit volunteers are set aside.
 
         A reader task hands every line either to the question waiting for its answer or, when
@@ -764,6 +794,9 @@ class ExtronClient:
         async with self._lock:
             lines: list[str] = []
             for wire in wires:
+                if self._skip(wire, skip_with):
+                    lines.append(skip_with or "")
+                    continue
                 inbox: asyncio.Queue[str] = asyncio.Queue()
                 self._inbox = inbox
                 try:
@@ -777,9 +810,11 @@ class ExtronClient:
                     while not inbox.empty():
                         self._dispatch(inbox.get_nowait())
                 if line is None:
+                    self._strikes[wire] = self._strikes.get(wire, 0) + 1
                     self._record_error("No reply from the unit")
                     self._spawn(self._close_links())
                     raise ExtronTimeoutError("No reply from the unit")
+                self._strikes.pop(wire, None)
                 lines.append(line)
         self.last_reply = datetime.now(UTC)
         return lines
@@ -1072,7 +1107,7 @@ class ExtronClient:
             wires.append((kind, 1, f"{ESC}0*1*{kind}VC\r"))
             if self.outputs > 16:
                 wires.append((kind, 17, f"{ESC}0*17*{kind}VC\r"))
-        lines = await self._request_many([w for _, _, w in wires])
+        lines = await self._request_many([w for _, _, w in wires], skip_with="E10")
         for (kind, start, _), line in zip(wires, lines, strict=True):
             if error_code(line) is None:
                 self._apply_ties(kind, start, line)
@@ -1092,7 +1127,7 @@ class ExtronClient:
             wires += [f"{o}V" for o in range(1, self.outputs + 1)]
             wires += [f"{i}G" for i in range(1, self.inputs + 1)]
         wires += ["X", f"{ESC}I\r", f"{ESC}O\r"]
-        lines = await self._request_many(wires)
+        lines = await self._request_many(wires, skip_with="E10")
         pos = 0
         for kind in kinds:
             for start in (1, 17) if self.outputs > 16 else (1,):
@@ -1141,7 +1176,7 @@ class ExtronClient:
 
     async def _read_identity(self) -> None:
         """A serial connection gives no copyright message: ask for the part number and version."""
-        part, version = await self._request_many(["N", "Q"])
+        part, version = await self._request_many(["N", "Q"], skip_with="E10")
         if re.fullmatch(r"\d{2}-\d{3}-\d{2}", part.strip()):
             self.banner["part_number"] = part.strip()
         if re.fullmatch(r"[\d.]+", version.strip()):
@@ -1150,7 +1185,9 @@ class ExtronClient:
     async def _refresh_info(self) -> None:
         """Read the power and temperature status and the unit's information (all optional)."""
         wires = ["S"] + [f"{ESC}{cmd}\r" for _key, cmd in INFO_COMMANDS]
-        lines = await self._request_many(wires, settle=frozenset({wires[-1]}))
+        lines = await self._request_many(
+            wires, settle=frozenset({wires[-1]}), skip_with="E10"
+        )
         if error_code(lines[0]) is None:
             self.status = parse_status(lines[0])
         for (key, _cmd), line in zip(INFO_COMMANDS, lines[1:], strict=True):
@@ -1162,7 +1199,7 @@ class ExtronClient:
     async def _refresh_names(self) -> None:
         wires = [f"{ESC}{i}NI\r" for i in range(1, self.inputs + 1)]
         wires += [f"{ESC}{o}NO\r" for o in range(1, self.outputs + 1)]
-        lines = await self._request_many(wires)
+        lines = await self._request_many(wires, skip_with="")
         for index, line in enumerate(lines[: self.inputs], start=1):
             self.in_names[index] = _make_name(line, f"Input {index:02d}")
         for index, line in enumerate(lines[self.inputs :], start=1):
@@ -1172,7 +1209,7 @@ class ExtronClient:
     async def async_refresh_presets(self) -> None:
         """Find out which presets are saved, and their names."""
         lines = await self._request_many(
-            [f"{ESC}{p}*1*1VC\r" for p in range(1, MAX_PRESETS + 1)]
+            [f"{ESC}{p}*1*1VC\r" for p in range(1, MAX_PRESETS + 1)], skip_with="E13"
         )
         found: dict[int, Preset] = {}
         count = 0

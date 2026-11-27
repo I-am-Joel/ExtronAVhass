@@ -72,6 +72,7 @@ async def async_get_config_entry_diagnostics(
                 "last_error_time": client.last_error_time.isoformat()
                 if client.last_error_time
                 else None,
+                "unexpected_replies": dict(client.unparsed),
             },
         }
     return {
@@ -107,6 +108,7 @@ async def async_get_config_entry_diagnostics(
             "groups_out": client.groups_out,
             "presets": {str(n): p.saved for n, p in sorted(client.presets.items())},
             "last_reply": client.last_reply.isoformat() if client.last_reply else None,
+            "left_out_commands": sorted(client.quarantined),
             "last_error": client.last_error,
             "last_error_time": client.last_error_time.isoformat()
             if client.last_error_time

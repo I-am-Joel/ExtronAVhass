@@ -64,6 +64,7 @@ class Sim:
         self.clock = "Thu, 19 Nov 2026 16:23:07"
         self.zone = "-12:00"  # as the unit reads it back: 00:00, +01:00, -05:00
         self.dst = 0
+        self.mute_commands: set[str] = set()
         self.mute_replies = False  # for the "unit stops answering" test
         self.video[1] = 1
         self.audio[1] = 1
@@ -186,6 +187,8 @@ class Sim:
                 continue
             text, conn.buffer = match.group(0), conn.buffer[match.end() :]
             self.log.append(text)
+            if text in self.mute_commands:
+                continue  # a command this unit never answers
             self.plain(conn, text)
 
     def v3(self, conn: Conn) -> bool:

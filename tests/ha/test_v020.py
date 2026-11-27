@@ -16,6 +16,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.extron.const import DOMAIN
 from custom_components.extron.in1508 import (
     VALID_RATES,
+    Extron1508Client,
     clamp_rate,
     parse_in_status,
 )
@@ -504,6 +505,100 @@ async def test_announcement_between_a_question_and_its_answer() -> None:
         assert client.volume[7] == 12 and client.gain[2] == -6 and client.video[3] == 5
         assert client.volume[3] == 64  # read after the announcement, so the real value wins
         assert client.available
+    finally:
+        await client.async_stop()
+        await sim.stop()
+
+
+# -- 0.2.1: a reply of an unexpected shape must never lock the unit out ------------------------------
+
+
+def test_status_with_a_dash_for_the_standard() -> None:
+    """An active digital or RGB signal has no video standard: the unit sends a dash."""
+    assert parse_in_status("Chn7 Pch0 Std-") == (7, 0, -1)
+    assert parse_in_status("Chn7 Pch0 Std") == (7, 0, None)
+    assert parse_in_status("Chn7 Pch0 Std9") == (7, 0, 9)
+    assert parse_in_status("Chn7 Pch0") is None
+
+
+async def test_in1508_on_an_input_with_no_standard(hass: HomeAssistant) -> None:
+    """The exact failure seen on a real unit: input 7 answers ``Std-`` and the unit stayed unavailable."""
+    sim = Sim1508(select_delay=0.0)
+    sim.input, sim.standard = 7, None
+    entry = await setup_scaler(hass, sim)
+    assert entry.runtime_data.client.available
+    assert state_of(hass, entry, "select", "input").state == "Input 7"
+    assert state_of(hass, entry, "sensor", "standard").state == "N/A"
+    # Switching between inputs with and without a standard keeps working.
+    select = entity_id(hass, entry, "select", "input")
+    await call(hass, "select", "select_option", entity_id=select, option="Input 3")
+    sim.standard = None
+    await call(hass, "select", "select_option", entity_id=select, option="Input 5")
+    assert entry.runtime_data.client.available
+    assert state_of(hass, entry, "sensor", "standard").state == "N/A"
+    await finish_scaler(hass, entry, sim)
+
+
+async def test_probe_recognises_an_in1508_with_no_standard() -> None:
+    """Setup detection reads the same line."""
+    sim = Sim1508()
+    sim.standard = None
+    port = await sim.start()
+    info = await async_probe("127.0.0.1", port)
+    assert info["kind"] == "in1508"
+    await sim.stop()
+
+
+async def test_in1508_unexpected_reply_is_not_silence(hass: HomeAssistant) -> None:
+    """A reply the integration does not expect leaves the value unknown but the unit available."""
+    sim = Sim1508()
+    sim.odd = {"B": "Vmt2", "F": "Frz?", "V": "Volume 7"}
+    entry = await setup_scaler(hass, sim)
+    client = entry.runtime_data.client
+    assert client.available
+    assert client.video_mute is None and client.freeze is None and client.volume is None
+    assert client.audio_mute is False  # the readings that were understood are kept
+    assert client.unparsed["B"] == "Vmt2"
+    await finish_scaler(hass, entry, sim)
+
+
+async def test_in1508_unanswered_read_is_left_out_not_fatal() -> None:
+    """A command the unit never answers is left out after repeated tries; the rest keeps working."""
+    sim = Sim1508()
+    sim.silent = {"F"}
+    port = await sim.start()
+    client = Extron1508Client(
+        "127.0.0.1", port, reconnect_delay=0.1, request_timeout=0.3, refresh_interval=30
+    )
+    await client.async_start()
+    try:
+        assert await client.async_wait_ready(15)
+        assert client.available
+        assert client.freeze is None and client.volume == 100
+        await client.async_set_mute(video=True, muted=False)  # still controllable
+        assert sim.vmute == 0
+        assert "F" in client.unparsed
+    finally:
+        await client.async_stop()
+        await sim.stop()
+
+
+async def test_matrix_unanswered_read_is_left_out_not_fatal() -> None:
+    """The same safety net on a matrix switcher: one command never answered cannot lock it out."""
+    sim = Sim()
+    sim.mute_commands = {"S"}
+    port = await sim.start()
+    client = ExtronClient(
+        "127.0.0.1", port, 24, 24, reconnect_delay=0.1, request_timeout=0.3
+    )
+    await client.async_start()
+    try:
+        assert await client.async_wait_ready(20)
+        assert client.available
+        assert "S" in client.quarantined
+        assert client.status == {}
+        await client.async_set_volume(1, 9)
+        assert sim.volume[1] == 9
     finally:
         await client.async_stop()
         await sim.stop()

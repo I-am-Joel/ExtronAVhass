@@ -104,7 +104,19 @@ PIP_SIZES = {
     5: "Side by side (full screen)",
 }
 ASPECTS = {0: "4:3", 1: "16:9"}
-STANDARDS = {0: "None", 1: "NTSC 3.58", 2: "PAL", 3: "NTSC 4.43", 4: "SECAM"}
+# The unit sends a dash for the standard when the input carries an active digital or RGB/YUV
+# signal (there is no video standard to report): that is held here as -1.
+NO_STANDARD = -1
+STANDARDS = {
+    NO_STANDARD: "N/A",
+    0: "None",
+    1: "NTSC 3.58",
+    2: "PAL",
+    3: "NTSC 4.43",
+    4: "SECAM",
+}
+STATUS_SHAPE = r"Chn\d+\s+Pch\d+\s+Std\S*"
+QUARANTINE_AFTER = 2  # reads that got no answer in this many tries in a row are left out
 
 # The picture controls: key -> (read, set, reply tag, minimum, maximum)
 PICTURE = {
@@ -117,7 +129,7 @@ PICTURE = {
 PICTURE_KEYS = (*PICTURE, "gain", "aspect")
 
 _ANY_ERROR = r"E\d\d"
-_RE_STATUS = re.compile(r"^Chn(\d+)\s+Pch(\d+)\s+Std(\d+)$")
+_RE_STATUS = re.compile(r"^Chn(\d+)\s+Pch(\d+)\s+Std(\S*)$")
 _RE_CHN = re.compile(r"^Chn(\d+)$")
 _RE_NUMBER = {
     "mute_video": re.compile(r"^Vmt([01])$"),
@@ -138,12 +150,24 @@ _ANNOUNCE = re.compile(
 )
 
 
-def parse_in_status(line: str) -> tuple[int, int, int] | None:
-    """Parse ``Chn1 Pch0 Std0`` into (input, pip input, signal standard)."""
+def parse_in_status(line: str) -> tuple[int, int, int | None] | None:
+    """Parse ``Chn1 Pch0 Std0`` into (input, pip input, signal standard).
+
+    The standard is a number, or a dash when the input has no video standard (held as
+    NO_STANDARD), or None if the unit says something else there.
+    """
     match = _RE_STATUS.match(line.strip())
     if not match:
         return None
-    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+    word = match.group(3)
+    standard: int | None
+    if word.isdigit():
+        standard = int(word)
+    elif word == "-":
+        standard = NO_STANDARD
+    else:
+        standard = None
+    return int(match.group(1)), int(match.group(2)), standard
 
 
 def clamp_rate(resolution: int, rate: int) -> int:
@@ -195,8 +219,12 @@ class Extron1508Client:
         read_only: bool = False,
         refresh_interval: float = 60.0,
         reconnect_delay: float = 5.0,
+        request_timeout: float = READ_TIMEOUT,
     ) -> None:
         """Initialise (nothing connects until async_start)."""
+        self._request_timeout = request_timeout
+        self._strikes: dict[str, int] = {}
+        self.unparsed: dict[str, str] = {}  # the last unexpected reply to each command
         self._host = host
         self._port = port
         self.read_only = read_only
@@ -306,7 +334,7 @@ class Extron1508Client:
 
     # -- requests ----------------------------------------------------------------
 
-    async def _request(self, wire: str, expect: str, timeout: float = READ_TIMEOUT) -> str:
+    async def _request(self, wire: str, expect: str, timeout: float | None = None) -> str:
         """Send one command; return the line that matches ``expect`` (an error code raises)."""
         link = self._link
         if link is None:
@@ -318,8 +346,9 @@ class Extron1508Client:
             try:
                 await link.write(wire)
                 try:
-                    line = await asyncio.wait_for(future, timeout)
+                    line = await asyncio.wait_for(future, timeout or self._request_timeout)
                 except TimeoutError:
+                    self._strikes[wire] = self._strikes.get(wire, 0) + 1
                     self._record_error("No reply from the unit")
                     # A late reply would put every later answer out of step: start again.
                     self._spawn(self._drop_link())
@@ -330,6 +359,9 @@ class Extron1508Client:
             finally:
                 self._waiter = None
         self.last_reply = datetime.now(UTC)
+        self._strikes.pop(wire, None)
+        if not pattern.match(line):
+            self._note_unparsed(wire, line)
         code = error_code(line)
         if code is not None:
             error = Extron1508CommandError(code)
@@ -348,11 +380,38 @@ class Extron1508Client:
         if not line:
             return
         waiter = self._waiter
-        if waiter is not None and not waiter[1].done() and waiter[0].match(line):
+        # The answer to the question asked. A reply of an unexpected shape is still the answer
+        # (never mistaken for silence): the reader deals with what is in it.
+        if (
+            waiter is not None
+            and not waiter[1].done()
+            and (waiter[0].match(line) or not _ANNOUNCE.match(line))
+        ):
             waiter[1].set_result(line)
             return
         if _ANNOUNCE.match(line):
             self._settle()
+
+    def _note_unparsed(self, wire: str, line: str) -> None:
+        """Remember a reply that was not the expected shape, and say so once."""
+        if self.unparsed.get(wire) != line:
+            _LOGGER.warning(
+                "Unexpected reply %r to command %r: reading it as far as possible", line, wire
+            )
+        self.unparsed[wire] = line
+
+    def _quarantined(self, wire: str) -> bool:
+        """Whether a read has gone unanswered so often that it is left out for now."""
+        if self._strikes.get(wire, 0) < QUARANTINE_AFTER:
+            return False
+        if wire not in self.unparsed:
+            _LOGGER.warning(
+                "Command %r got no reply %d times in a row: leaving it out of the readings",
+                wire,
+                QUARANTINE_AFTER,
+            )
+            self.unparsed[wire] = "(no reply)"
+        return True
 
     def _settle(self) -> None:
         """Read the state again once the unit has been quiet for a moment."""
@@ -470,7 +529,9 @@ class Extron1508Client:
     # -- reads -------------------------------------------------------------------------------
 
     async def _read_number(self, wire: str, pattern: re.Pattern[str]) -> int | None:
-        """Read one value; None if the unit says it does not apply (an error reply)."""
+        """Read one value; None if the unit says it does not apply or the reply is not understood."""
+        if self._quarantined(wire):
+            return None
         try:
             line = await self._request(wire, pattern.pattern[1:-1])
         except Extron1508CommandError:
@@ -480,10 +541,15 @@ class Extron1508Client:
 
     async def _read_state(self) -> None:
         """Read the output side and the selected input's picture controls."""
-        line = await self._request("I", r"Chn\d+\s+Pch\d+\s+Std\d+")
-        status = parse_in_status(line)
-        if status is not None:
-            self.input, self.pip_input, self.standard = status
+        if not self._quarantined("I"):
+            try:
+                line = await self._request("I", STATUS_SHAPE)
+            except Extron1508CommandError:
+                pass
+            else:
+                status = parse_in_status(line)
+                if status is not None:
+                    self.input, self.pip_input, self.standard = status
         value = await self._read_number("B", _RE_NUMBER["mute_video"])
         self.video_mute = None if value is None else bool(value)
         value = await self._read_number("Z", _RE_NUMBER["mute_audio"])
@@ -494,15 +560,16 @@ class Extron1508Client:
         value = await self._read_number("5#", _RE_NUMBER["pip"])
         self.pip = None if value is None else bool(value)
         self.pip_size = await self._read_number("4#", _RE_NUMBER["pip_size"])
-        try:
-            line = await self._request("=", r"Rte\d+\*\d+")
-        except Extron1508CommandError:
-            pass
-        else:
-            match = _RE_RATE.match(line)
-            if match:
-                self.resolution, self.rate = int(match.group(1)), int(match.group(2))
-        picture = self._picture(self.input) if self.input else None
+        if not self._quarantined("="):
+            try:
+                line = await self._request("=", r"Rte\d+\*\d+")
+            except Extron1508CommandError:
+                pass
+            else:
+                match = _RE_RATE.match(line)
+                if match:
+                    self.resolution, self.rate = int(match.group(1)), int(match.group(2))
+        picture = self._picture(self.input) if self.input is not None else None
         if picture is not None:
             for key, (reader, _setter, tag, _low, _high) in PICTURE.items():
                 picture.values[key] = await self._read_number(
