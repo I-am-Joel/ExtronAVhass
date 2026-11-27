@@ -8,7 +8,8 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .entity import ExtronConfigEntry, ExtronEntity
+from .entity import ExtronConfigEntry, ExtronEntity, is_scaler
+from .scaler_entities import setup_scaler_switches
 
 
 async def async_setup_entry(
@@ -17,14 +18,14 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the mute switches."""
-    outputs = entry.runtime_data.client.outputs
-    entities: list[SwitchEntity] = [
-        ExtronMuteAll(entry, video=True),
-        ExtronMuteAll(entry, video=False),
-    ]
-    for output in range(1, outputs + 1):
-        entities.append(ExtronMute(entry, output, video=True))
-        entities.append(ExtronMute(entry, output, video=False))
+    if is_scaler(entry):
+        await setup_scaler_switches(entry, async_add_entities)
+        return
+    client = entry.runtime_data.client
+    layers = (True, False) if client.audio_present else (True,)
+    entities: list[SwitchEntity] = [ExtronMuteAll(entry, video=v) for v in layers]
+    for output in range(1, client.outputs + 1):
+        entities.extend(ExtronMute(entry, output, video=v) for v in layers)
     async_add_entities(entities)
 
 

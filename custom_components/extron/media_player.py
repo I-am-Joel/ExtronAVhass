@@ -78,11 +78,7 @@ class ExtronAllOutputs(ExtronEntity, MediaPlayerEntity):
     @property
     def source(self) -> str | None:
         """The input feeding every output, None (the word) if none, or Mixed."""
-        client = self._client
-        outputs = range(1, client.outputs + 1)
-        values = {client.video.get(o) for o in outputs} | {
-            client.audio.get(o) for o in outputs
-        }
+        values = self._client.source_values()
         if None in values:
             return None
         if len(values) == 1:

@@ -25,11 +25,13 @@ from homeassistant.helpers.selector import (
 
 from . import refresh_seconds
 from .const import (
+    CONF_AUDIO,
     CONF_AUDIO_INPUT_NAMES,
     CONF_AUDIO_OUTPUT_NAMES,
     CONF_HOST,
     CONF_INPUT_NAMES,
     CONF_INPUTS,
+    CONF_KIND,
     CONF_MODEL_NAME,
     CONF_OUTPUT_NAMES,
     CONF_OUTPUTS,
@@ -41,12 +43,13 @@ from .const import (
     CONF_UNIT_NAME,
     DEFAULT_PORT,
     DOMAIN,
+    KIND_IN1508,
     MAX_REFRESH,
     MIN_REFRESH,
     SOURCE_MIXED,
     SOURCE_NONE,
 )
-from .entity import ExtronData
+from .entity import ExtronData, ScalerData
 from .protocol import (
     ExtronAuthError,
     ExtronConnectionError,
@@ -61,6 +64,8 @@ CONF_NAME = "name"
 def _model_name(info: Mapping[str, Any]) -> str:
     product = info.get("product", "Matrix switcher")
     part = info.get("part_number")
+    if info.get("kind") == KIND_IN1508:
+        return f"{product}" + (f" ({part})" if part else "")
     return f"{product} {info['inputs']}x{info['outputs']}" + (
         f" ({part})" if part else ""
     )
@@ -135,6 +140,8 @@ class ExtronConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_OUTPUTS: info["outputs"],
             CONF_MODEL_NAME: _model_name(info),
             CONF_UNIT_NAME: info.get("unit_name", ""),
+            CONF_KIND: info.get("kind", ""),
+            CONF_AUDIO: bool(info.get("audio", True)),
         }
 
     async def async_step_user(
@@ -236,14 +243,43 @@ def _parse_names(text: str, defaults: list[str]) -> tuple[list[str], str | None]
 class ExtronOptionsFlow(OptionsFlow):
     """Edit the names and the refresh interval."""
 
+    async def _scaler_step(
+        self, entry: ConfigEntry, user_input: dict[str, Any] | None
+    ) -> ConfigFlowResult:
+        """The IN1508 has no names to edit: only the refresh interval."""
+        if user_input is not None:
+            return self.async_create_entry(
+                data={
+                    **entry.options,
+                    CONF_REFRESH_SECONDS: int(user_input[CONF_REFRESH_SECONDS]),
+                }
+            )
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_REFRESH_SECONDS, default=refresh_seconds(entry.options)
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=MIN_REFRESH,
+                        max=MAX_REFRESH,
+                        step=1,
+                        mode=NumberSelectorMode.BOX,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show every name, one per line."""
         entry = self.config_entry
-        data: ExtronData | None = getattr(entry, "runtime_data", None)
+        data: ExtronData | ScalerData | None = getattr(entry, "runtime_data", None)
         if data is None:
             return self.async_abort(reason="unit_unavailable")
+        if isinstance(data, ScalerData):
+            return await self._scaler_step(entry, user_input)
         specs = (
             (CONF_INPUT_NAMES, data.in_video, [f"{n} Video" for n in data.in_base]),
             (

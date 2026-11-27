@@ -6,8 +6,9 @@ from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .entity import ExtronConfigEntry, ExtronEntity
+from .entity import ExtronConfigEntry, ExtronEntity, is_scaler
 from .protocol import MAX_GAIN, MAX_VOLUME, MIN_GAIN, MIN_VOLUME
+from .scaler_entities import setup_scaler_numbers
 
 
 async def async_setup_entry(
@@ -16,7 +17,12 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the numbers."""
+    if is_scaler(entry):
+        await setup_scaler_numbers(entry, async_add_entities)
+        return
     client = entry.runtime_data.client
+    if not client.audio_present:
+        return
     entities: list[NumberEntity] = [
         ExtronVolume(entry, o) for o in range(1, client.outputs + 1)
     ]

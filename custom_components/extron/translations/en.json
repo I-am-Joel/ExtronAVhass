@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Extron matrix switcher",
-        "description": "Address of the switcher's Ethernet port (Telnet, port 23). Leave the password empty if the unit has none. Telnet is not encrypted, so only use this on a network you trust.",
+        "description": "Address of the switcher's Ethernet port (Telnet, port 23), or of a serial-to-Ethernet bridge and its port for a unit controlled over its serial port (the IN1508 is serial only). Leave the password empty if the unit has none. Telnet is not encrypted, so only use this on a network you trust.",
         "data": {
           "name": "Name",
           "host": "IP address",
@@ -57,7 +57,7 @@
         },
         "data_description": {
           "refresh_seconds": "The unit reports changes by itself; this is only a safety net.",
-          "show_advanced": "Turns on the group selects, the save and clear preset buttons and the three reset buttons (they are off by default). Unticking turns them off again."
+          "show_advanced": "Turns on the group selects, the save and clear preset buttons and the reset buttons for input levels and output volumes (they are off by default). Unticking turns them off again."
         }
       }
     },

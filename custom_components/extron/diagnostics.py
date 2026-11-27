@@ -16,7 +16,7 @@ from .const import (
     CONF_PASSWORD,
     CONF_UNIT_NAME,
 )
-from .entity import ExtronConfigEntry
+from .entity import ExtronConfigEntry, is_scaler
 
 TO_REDACT = {
     CONF_HOST,
@@ -37,6 +37,43 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return what is useful for fault-finding."""
     client = entry.runtime_data.client
+    if is_scaler(entry):
+        return {
+            "entry": async_redact_data(
+                {
+                    "title": entry.title,
+                    "unique_id": entry.unique_id,
+                    "data": dict(entry.data),
+                    "options": dict(entry.options),
+                },
+                TO_REDACT,
+            ),
+            "model": entry.runtime_data.model_name,
+            "banner": dict(client.banner),
+            "state": {
+                "available": client.available,
+                "read_only": client.read_only,
+                "input": client.input,
+                "pip_input": client.pip_input,
+                "standard": client.standard,
+                "video_mute": client.video_mute,
+                "audio_mute": client.audio_mute,
+                "freeze": client.freeze,
+                "volume": client.volume,
+                "pip": client.pip,
+                "pip_size": client.pip_size,
+                "resolution": client.resolution,
+                "rate": client.rate,
+                "pictures": {
+                    str(n): dict(p.values) for n, p in sorted(client.pictures.items())
+                },
+                "last_reply": client.last_reply.isoformat() if client.last_reply else None,
+                "last_error": client.last_error,
+                "last_error_time": client.last_error_time.isoformat()
+                if client.last_error_time
+                else None,
+            },
+        }
     return {
         "entry": async_redact_data(
             {

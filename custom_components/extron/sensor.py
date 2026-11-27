@@ -21,9 +21,12 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import DST_OPTIONS, SOURCE_NONE
-from .entity import ExtronConfigEntry, ExtronEntity
+from .entity import ExtronConfigEntry, ExtronEntity, is_scaler
+from .protocol import parse_clock
+from .scaler_entities import setup_scaler_sensors
 
 STATE_SAVED = "saved"
 STATE_EMPTY = "empty"
@@ -35,6 +38,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up one sensor per preset the unit has."""
+    if is_scaler(entry):
+        await setup_scaler_sensors(entry, async_add_entities)
+        return
     client = entry.runtime_data.client
     entities: list[SensorEntity] = [ExtronRoutingSummary(entry)]
     entities.extend(
@@ -57,6 +63,11 @@ async def async_setup_entry(
 
 def _fahrenheit_to_celsius(value: float) -> float:
     return round((float(value) - 32) * 5 / 9, 1)
+
+
+def _clock_to_timestamp(value: Any) -> Any:
+    """The unit shows a local time; take it as Home Assistant's local time (what Sync clock writes)."""
+    return parse_clock(str(value), dt_util.get_default_time_zone())
 
 
 def _on_off(value: Any) -> str:
@@ -138,6 +149,8 @@ DESCRIPTIONS: tuple[ExtronSensorDescription, ...] = (
     _volts("v_m5", "-5 V rail"),
     _volts("v_m12", "-12 V rail"),
     _volts("v12", "12 V rail"),
+    _volts("v15", "15 V rail"),
+    _volts("v_m15", "-15 V rail"),
     _text("banner", "firmware", "Firmware version", "mdi:chip"),
     _text("banner", "part_number", "Part number", "mdi:identifier"),
     _text("info", "unit_name", "Unit name", "mdi:tag-text"),
@@ -146,7 +159,15 @@ DESCRIPTIONS: tuple[ExtronSensorDescription, ...] = (
     _text("info", "gateway", "Gateway", "mdi:router-network"),
     _text("info", "mac", "MAC address", "mdi:network"),
     _text("info", "dhcp", "DHCP", "mdi:ip", convert=_on_off),
-    _text("info", "clock", "Unit clock", "mdi:clock-outline"),
+    ExtronSensorDescription(
+        key="clock",
+        source="info",
+        name="Unit clock",
+        icon="mdi:clock-outline",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        convert=_clock_to_timestamp,
+    ),
     _text("info", "gmt_offset", "Time zone offset", "mdi:earth"),
     _text(
         "info",

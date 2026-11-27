@@ -19,13 +19,13 @@ pytestmark = pytest.mark.allow_hosts(["127.0.0.1"])
 
 
 def test_offset_helpers() -> None:
-    """Offsets are written H:MM and read back as +HH:MM."""
-    assert format_offset(0) == "0:00"
-    assert format_offset(60) == "1:00"
-    assert format_offset(-300) == "-5:00"
-    assert format_offset(330) == "5:30"
-    assert format_offset(-720) == "-12:00"
-    assert format_offset(840) == "14:00"
+    """Offsets are written H.MM (no plus sign) and read back as +HH:MM."""
+    assert format_offset(0) == "0.00"
+    assert format_offset(60) == "1.00"
+    assert format_offset(-300) == "-5.00"
+    assert format_offset(330) == "5.30"
+    assert format_offset(-720) == "-12.00"
+    assert format_offset(840) == "14.00"
     assert "+" not in format_offset(60)
     assert normalise_offset("00:00") == "+00:00"
     assert normalise_offset("+01:00") == "+01:00"
@@ -67,7 +67,7 @@ async def test_change_made_elsewhere_is_picked_up(hass: HomeAssistant) -> None:
     sim.event("Ipz+01:00")
     sim.event("Ipx3")
     await hass.async_block_till_done()
-    import asyncio  # noqa: PLC0415
+    import asyncio
 
     await asyncio.sleep(0.2)
     assert hass.states.get(entity_id(hass, entry, "select", "time_zone")).state == "GMT+01:00"
@@ -121,7 +121,7 @@ async def test_resets_are_off_by_default(hass: HomeAssistant) -> None:
     """The reset buttons only appear with Show advanced controls."""
     sim = Sim()
     entry = await setup(hass, sim)
-    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+    from homeassistant.helpers import entity_registry as er
 
     item = er.async_get(hass).async_get_entity_id(
         "button", "extron", f"{entry.entry_id}_reset_output_volumes"

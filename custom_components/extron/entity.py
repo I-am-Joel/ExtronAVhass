@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -11,6 +12,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
 
 from .const import DOMAIN, SOURCE_NONE
+from .in1508 import Extron1508Client
 from .protocol import ExtronClient, ExtronError, ExtronReadOnlyError
 
 
@@ -32,7 +34,24 @@ class ExtronData:
     show_advanced: bool = False
 
 
-type ExtronConfigEntry = ConfigEntry[ExtronData]
+@dataclass
+class ScalerData:
+    """What the platforms need for an IN1508 scaling switcher."""
+
+    client: Extron1508Client
+    model_name: str
+    unit_name: str = ""
+    read_only: bool = False
+    show_advanced: bool = False
+    applied_options: dict = field(default_factory=dict)
+
+
+type ExtronConfigEntry = ConfigEntry[ExtronData | ScalerData]
+
+
+def is_scaler(entry: ConfigEntry) -> bool:
+    """Whether this entry is an IN1508 rather than a matrix switcher."""
+    return isinstance(getattr(entry, "runtime_data", None), ScalerData)
 
 
 def source_options(names: list[str]) -> list[str]:
@@ -67,8 +86,8 @@ class ExtronEntity(Entity):
     def __init__(self, entry: ExtronConfigEntry, key: str) -> None:
         """Initialise the entity."""
         self._entry = entry
-        self._data = entry.runtime_data
-        self._client = entry.runtime_data.client
+        self._data: Any = entry.runtime_data
+        self._client: Any = entry.runtime_data.client
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},

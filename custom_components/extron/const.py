@@ -10,6 +10,10 @@ CONF_INPUTS = "inputs"
 CONF_OUTPUTS = "outputs"
 CONF_MODEL_NAME = "model_name"
 CONF_UNIT_NAME = "unit_name"
+CONF_KIND = "kind"
+CONF_AUDIO = "audio"
+
+KIND_IN1508 = "in1508"
 
 CONF_INPUT_NAMES = "input_names"
 CONF_AUDIO_INPUT_NAMES = "audio_input_names"

@@ -30,15 +30,31 @@ async def async_setup_entry(
     client = entry.runtime_data.client
     entities: list[ButtonEntity] = []
     entities.append(ExtronSyncClockButton(entry))
-    entities += [
+    entities.append(
         ExtronResetButton(
             entry,
             "reset_mutes",
             "Reset all mutes",
             "mdi:volume-off",
-            "unmute the video and audio of every output",
+            "unmute the video and audio of every output"
+            if client.audio_present
+            else "unmute the video of every output",
             client.async_reset_mutes,
-        ),
+            enabled_by_default=True,
+        )
+    )
+    if client.audio_present:
+        entities += _audio_reset_buttons(entry, client)
+    for preset in range(1, client.preset_count + 1):
+        entities.append(ExtronRecallButton(entry, preset))
+        entities.append(ExtronSaveButton(entry, preset))
+        entities.append(ExtronClearButton(entry, preset))
+    async_add_entities(entities)
+
+
+def _audio_reset_buttons(entry: ExtronConfigEntry, client: Any) -> list[ButtonEntity]:
+    """The two resets that only mean something on a unit with an audio side."""
+    return [
         ExtronResetButton(
             entry,
             "reset_input_levels",
@@ -56,11 +72,6 @@ async def async_setup_entry(
             client.async_reset_output_volumes,
         ),
     ]
-    for preset in range(1, client.preset_count + 1):
-        entities.append(ExtronRecallButton(entry, preset))
-        entities.append(ExtronSaveButton(entry, preset))
-        entities.append(ExtronClearButton(entry, preset))
-    async_add_entities(entities)
 
 
 class ExtronRecallButton(ExtronEntity, ButtonEntity):
@@ -197,6 +208,8 @@ class ExtronResetButton(ExtronEntity, ButtonEntity):
         icon: str,
         effect: str,
         action: Callable[[], Awaitable[None]],
+        *,
+        enabled_by_default: bool = False,
     ) -> None:
         """Initialise."""
         super().__init__(entry, key)
@@ -206,7 +219,9 @@ class ExtronResetButton(ExtronEntity, ButtonEntity):
         self._action = action
         self._armed = False
         self._cancel: CALLBACK_TYPE | None = None
-        self._attr_entity_registry_enabled_default = self._data.show_advanced
+        self._attr_entity_registry_enabled_default = (
+            enabled_by_default or self._data.show_advanced
+        )
         self._notification_id = f"{DOMAIN}_{entry.entry_id}_{key}"
 
     async def async_will_remove_from_hass(self) -> None:

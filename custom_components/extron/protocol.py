@@ -20,7 +20,7 @@ import re
 import socket
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
@@ -148,22 +148,26 @@ STATUS_KEYS = (
     "psu1",
     "psu2",
 )
+# The shorter list the MAV Plus 1616 gives (identified by the size of each value).
+STATUS_KEYS_SHORT = ("v3_3", "v5", "v_m5", "v15", "v_m15", "temp_f")
 
 
 def parse_status(line: str) -> dict[str, float]:
-    """Parse the ``S`` reply of a MAV Plus (12 values: rails, temperature in F, fans, supplies).
+    """Parse the ``S`` reply: six values (MAV Plus 1616) or twelve (MAV Plus 2424).
 
-    Units up to the 1616 answer with a different, shorter list; that is not understood yet,
-    so nothing is returned for it.
+    Only the values the unit reports are returned (nothing for a list of any other length).
     """
     tokens = line.split()
-    if len(tokens) != len(STATUS_KEYS):
+    keys = {len(STATUS_KEYS): STATUS_KEYS, len(STATUS_KEYS_SHORT): STATUS_KEYS_SHORT}.get(
+        len(tokens)
+    )
+    if keys is None:
         return {}
     try:
         numbers = [float(t) for t in tokens]
     except ValueError:
         return {}
-    return dict(zip(STATUS_KEYS, numbers, strict=True))
+    return dict(zip(keys, numbers, strict=True))
 
 
 # Unit information, read with escape commands. The free-space reply is last because it is
@@ -207,19 +211,55 @@ def parse_info(key: str, line: str) -> str | int | bool | None:
 
 
 def format_offset(minutes: int) -> str:
-    """Write a time zone offset the way the unit takes it (H:MM, a minus sign only when negative)."""
+    """Write a time zone offset the way the unit takes it: H.MM, a minus sign only when negative.
+
+    The unit's manual gives a period between hours and minutes. A leading plus sign is left out
+    on purpose: a unit that is given one applies it but only answers at the next command.
+    """
     sign = "-" if minutes < 0 else ""
     hours, mins = divmod(abs(minutes), 60)
-    return f"{sign}{hours}:{mins:02d}"
+    return f"{sign}{hours}.{mins:02d}"
 
 
 def normalise_offset(text: str) -> str | None:
     """Turn the unit's offset reading (00:00, +01:00, -05:00) into +HH:MM or -HH:MM, or None."""
-    match = re.fullmatch(r"([+-]?)(\d{1,2}):(\d{2})", text.strip())
+    match = re.fullmatch(r"([+-]?)(\d{1,2})[:.](\d{2})", text.strip())
     if not match:
         return None
     sign = "-" if match.group(1) == "-" and (int(match.group(2)) or int(match.group(3))) else "+"
     return f"{sign}{int(match.group(2)):02d}:{match.group(3)}"
+
+
+_MONTHS = {
+    m: i
+    for i, m in enumerate(
+        ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"),
+        start=1,
+    )
+}
+_CLOCK_RE = re.compile(r"(\d{1,2})\s+([A-Za-z]{3})\w*\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})")
+
+
+def parse_clock(text: str, tz: tzinfo) -> datetime | None:
+    """Turn the unit's clock reading (``Fri, 09 Oct 2020 08:05:04``) into a datetime in ``tz``, or None."""
+    match = _CLOCK_RE.search(text)
+    if not match:
+        return None
+    month = _MONTHS.get(match.group(2).lower())
+    if month is None:
+        return None
+    try:
+        return datetime(
+            int(match.group(3)),
+            month,
+            int(match.group(1)),
+            int(match.group(4)),
+            int(match.group(5)),
+            int(match.group(6)),
+            tzinfo=tz,
+        )
+    except ValueError:
+        return None
 
 
 def parse_digits(line: str, count: int) -> list[int] | None:
@@ -255,6 +295,59 @@ _RE_NAME_OUT = re.compile(r"^Nmo(\d+),(.*)$")
 _RE_NAME_PRESET = re.compile(r"^Nmg(\d+),(.*)$")
 _RE_PRESET_EVENT = re.compile(r"^(Spr|Zpg)(\d+)$")
 _RE_RECALL = re.compile(r"^Rpr(\d+)$")
+
+
+# The lines a unit volunteers (and the tagged answers to changes, which look the same).
+_ANNOUNCEMENTS = (
+    _RE_VMUTE,
+    _RE_AMUTE,
+    _RE_VMUTE_ALL,
+    _RE_AMUTE_ALL,
+    _RE_ZONE,
+    _RE_DST,
+    _RE_CLOCK,
+    _RE_VOLUME,
+    _RE_GAIN,
+    _RE_TIE,
+    _RE_TIE_ALL,
+    _RE_LOCK,
+    _RE_NAME_IN,
+    _RE_NAME_OUT,
+    _RE_NAME_PRESET,
+    _RE_PRESET_EVENT,
+    _RE_RECALL,
+    re.compile(r"^(?:Qik|Ver\d+\*[\d.]+)$"),
+)
+_TIE_LIST = re.compile(r"^(?:\d\d|--)(?: (?:\d\d|--))* (?:Vid|Aud)$")
+_NAME_WIRE = re.compile(rf"^{ESC}\d+N[IOG]\r$")
+_SHAPES = {
+    f"{ESC}VM\r": re.compile(r"^\d+$"),
+    f"{ESC}I\r": re.compile(r"^[0-4,]+$"),
+    f"{ESC}O\r": re.compile(r"^[0-4,]+$"),
+    "X": re.compile(r"^[012]$"),
+    "Q": re.compile(r"^[\d.]+$"),
+    "N": re.compile(r"^\d\d-\d\d\d-\d\d$"),
+    "S": re.compile(r"^[-\d. ]+$"),
+}
+
+
+def is_announcement(line: str) -> bool:
+    """Whether a line looks like something a unit volunteers rather than the answer to a question."""
+    text = line.strip()
+    return any(pattern.match(text) for pattern in _ANNOUNCEMENTS)
+
+
+def expected_shape(wire: str) -> re.Pattern[str] | None:
+    """What a plain read's answer looks like (None for changes, whose answers are tagged lines)."""
+    if wire.startswith(ESC) and wire.endswith("VC\r"):
+        return _TIE_LIST
+    if wire in _SHAPES:
+        return _SHAPES[wire]
+    if re.fullmatch(r"\d+V", wire):
+        return re.compile(r"^\d+$")
+    if re.fullmatch(r"\d+G", wire):
+        return re.compile(r"^[+-]\d+$")
+    return None
 
 
 def _make_name(raw: str, fallback: str) -> str:
@@ -415,23 +508,58 @@ class ExtronLink:
                 await asyncio.wait_for(writer.wait_closed(), 2)
 
 
+def parse_audio_size(text: str) -> tuple[int, int] | None:
+    """Return (audio inputs, audio outputs) from a reply such as ``V24X24 A24X24``."""
+    match = _SIZE_RE.search(text)
+    if not match:
+        return None
+    return int(match.group(3)), int(match.group(4))
+
+
+async def _ask(link: ExtronLink, wire: str) -> str:
+    """Send one command during setup and return the reply line."""
+    await link.write(wire)
+    line = await link.read_line(3)
+    if line is None:
+        raise ExtronTimeoutError("No answer from the unit")
+    return line.strip()
+
+
 async def async_probe(host: str, port: int, password: str = "") -> dict[str, Any]:
-    """Connect once and describe the unit (used by the setup screens)."""
+    """Connect once and describe the unit (used by the setup screens).
+
+    Understands matrix switchers (over Ethernet, or over a serial bridge that gives no
+    copyright message) and the IN1508 scaling switcher (serial).
+    """
+    from .in1508 import async_describe_in1508, parse_in_status
+
     link = ExtronLink(host, port, password)
     await link.open()
     try:
         info: dict[str, Any] = dict(link.banner)
         info["privilege"] = link.privilege
-        for wire, key in (("I", "size"), (f"{ESC}CN\r", "unit_name")):
-            await link.write(wire)
-            line = await link.read_line(3)
-            if line is None:
-                raise ExtronTimeoutError("No answer from the unit")
-            info[key] = line.strip()
-        size = parse_size(info["size"])
+        size_line = await _ask(link, "I")
+        if parse_in_status(size_line) is not None:
+            described = await async_describe_in1508(link)
+            if described is None:
+                raise ExtronError("Something answered like an IN1508 but is not one")
+            return {**info, **described}
+        info["size"] = size_line
+        size = parse_size(size_line)
         if size is None:
-            raise ExtronError(f"Unexpected size reply: {info['size']}")
+            raise ExtronError(f"Unexpected size reply: {size_line}")
         info["inputs"], info["outputs"] = size
+        audio = parse_audio_size(size_line)
+        info["audio"] = bool(audio and audio[1] > 0)
+        info["unit_name"] = await _ask(link, f"{ESC}CN\r")
+        if not info.get("part_number"):
+            # A serial connection gives no copyright message: ask for the part number and version.
+            part = await _ask(link, "N")
+            version = await _ask(link, "Q")
+            if error_code(part) is None and re.fullmatch(r"\d{2}-\d{3}-\d{2}", part):
+                info["part_number"] = part
+            if error_code(version) is None and re.fullmatch(r"[\d.]+", version):
+                info["firmware"] = version
         return info
     finally:
         await link.close()
@@ -454,6 +582,7 @@ class ExtronClient:
         *,
         password: str = "",
         read_only: bool = False,
+        audio: bool = True,
         refresh_interval: float = 60.0,
         reconnect_delay: float = 5.0,
         request_timeout: float = 3.0,
@@ -463,6 +592,7 @@ class ExtronClient:
         self._port = port
         self._password = password
         self.read_only = read_only
+        self.audio_present = audio
         self.inputs = inputs
         self.outputs = outputs
         self._refresh_interval = refresh_interval
@@ -473,6 +603,8 @@ class ExtronClient:
         self._cmd: ExtronLink | None = None
         self._evt: ExtronLink | None = None
         self._lock = asyncio.Lock()
+        self._single = False  # one stream only (a serial unit): announcements share it with the answers
+        self._inbox: asyncio.Queue[str] | None = None
         self._listeners: list[Callable[[], None]] = []
         self._refresh_event = asyncio.Event()
         self._ready = asyncio.Event()
@@ -594,12 +726,19 @@ class ExtronClient:
         link = self._cmd
         if link is None:
             raise ExtronConnectionError("Not connected")
+        if self._single:
+            return await self._request_many_single(wires)
         async with self._lock:
             lines: list[str] = []
             for wire in wires:
                 link.drain()
-                await link.write(wire)
-                line = await link.read_line(self._request_timeout, keep_blank=True)
+                try:
+                    await link.write(wire)
+                    line = await link.read_line(self._request_timeout, keep_blank=True)
+                except ExtronConnectionError:
+                    # The unit hung up (it does that to a silent connection): start again.
+                    self._spawn(self._close_links())
+                    raise
                 if line is None:
                     self._record_error("No reply from the unit")
                     # A late reply would put every later answer out of step: start again.
@@ -612,6 +751,69 @@ class ExtronClient:
                     await link.read_line(0.2, keep_blank=True)
         self.last_reply = datetime.now(UTC)
         return lines
+
+    async def _request_many_single(self, wires: list[str]) -> list[str]:
+        """As ``_request_many`` on a single stream: lines the unit volunteers are set aside.
+
+        A reader task hands every line either to the question waiting for its answer or, when
+        nobody is waiting, to the listener for changes made elsewhere.
+        """
+        link = self._cmd
+        if link is None:
+            raise ExtronConnectionError("Not connected")
+        async with self._lock:
+            lines: list[str] = []
+            for wire in wires:
+                inbox: asyncio.Queue[str] = asyncio.Queue()
+                self._inbox = inbox
+                try:
+                    await link.write(wire)
+                    line = await self._next_answer(inbox, wire)
+                except ExtronConnectionError:
+                    self._spawn(self._close_links())
+                    raise
+                finally:
+                    self._inbox = None
+                    while not inbox.empty():
+                        self._dispatch(inbox.get_nowait())
+                if line is None:
+                    self._record_error("No reply from the unit")
+                    self._spawn(self._close_links())
+                    raise ExtronTimeoutError("No reply from the unit")
+                lines.append(line)
+        self.last_reply = datetime.now(UTC)
+        return lines
+
+    async def _next_answer(self, inbox: asyncio.Queue[str], wire: str) -> str | None:
+        """Wait for the answer to ``wire``, passing anything else the unit says to the listener."""
+        shape = expected_shape(wire)
+        loop = asyncio.get_running_loop()
+        end = loop.time() + self._request_timeout
+        while True:
+            try:
+                line = await asyncio.wait_for(inbox.get(), max(0.01, end - loop.time()))
+            except TimeoutError:
+                return None
+            if not line.strip() and not _NAME_WIRE.match(wire):
+                continue  # the blank line some replies end with
+            if shape is None or shape.match(line.strip()) or error_code(line) is not None:
+                return line
+            if is_announcement(line):
+                self._dispatch(line)
+                continue
+            return line
+
+    async def _single_reader(self, link: ExtronLink) -> None:
+        """Read forever, giving each line to the waiting question or to the change listener."""
+        while True:
+            line = await link.read_line(None, keep_blank=True)
+            if line is None:
+                continue
+            inbox = self._inbox
+            if inbox is not None:
+                inbox.put_nowait(line)
+            elif line.strip():
+                self._dispatch(line)
 
     async def _request(self, wire: str) -> str:
         """Send one command and return its reply, raising if the unit reports an error."""
@@ -626,6 +828,18 @@ class ExtronClient:
     def _check_writable(self) -> None:
         if self.read_only:
             raise ExtronReadOnlyError("This unit is set to read-only")
+
+    def _layers(self, video: bool, audio: bool) -> tuple[bool, bool]:
+        """A unit with no audio side only ever has video to tie."""
+        return video, audio and self.audio_present
+
+    def source_values(self) -> set[int | None]:
+        """Return the inputs feeding the outputs (None for an output not read yet)."""
+        outputs = range(1, self.outputs + 1)
+        values = {self.video.get(o) for o in outputs}
+        if self.audio_present:
+            values |= {self.audio.get(o) for o in outputs}
+        return values
 
     def _check_output(self, output: int) -> None:
         if not 1 <= output <= self.outputs:
@@ -644,6 +858,7 @@ class ExtronClient:
         self._check_writable()
         self._check_output(output)
         self._check_input(input_number, allow_zero=True)
+        video, audio = self._layers(video, audio)
         if not (video or audio):
             raise ValueError("Choose video, audio or both")
         symbol = "!" if video and audio else "%" if video else "$"
@@ -717,6 +932,7 @@ class ExtronClient:
         """Tie one input (0 = none) to every output for video, audio or both."""
         self._check_writable()
         self._check_input(input_number, allow_zero=True)
+        video, audio = self._layers(video, audio)
         if not (video or audio):
             raise ValueError("Choose video, audio or both")
         symbol = "!" if video and audio else "%" if video else "$"
@@ -739,6 +955,7 @@ class ExtronClient:
         """Tie one input (0 = none) to a chosen set of outputs, in a single command."""
         self._check_writable()
         self._check_input(input_number, allow_zero=True)
+        video, audio = self._layers(video, audio)
         if not (video or audio):
             raise ValueError("Choose video, audio or both")
         chosen = sorted(set(outputs))
@@ -851,7 +1068,7 @@ class ExtronClient:
 
     async def _refresh_ties(self) -> None:
         wires: list[tuple[int, int, str]] = []
-        for kind in (1, 2):
+        for kind in (1, 2) if self.audio_present else (1,):
             wires.append((kind, 1, f"{ESC}0*1*{kind}VC\r"))
             if self.outputs > 16:
                 wires.append((kind, 17, f"{ESC}0*17*{kind}VC\r"))
@@ -863,19 +1080,21 @@ class ExtronClient:
 
     async def _refresh_core(self) -> None:
         """Read ties, mutes, volumes, levels, the lock and the groups."""
+        kinds = (1, 2) if self.audio_present else (1,)
         wires = []
-        for kind in (1, 2):
+        for kind in kinds:
             wires.append(f"{ESC}0*1*{kind}VC\r")
             if self.outputs > 16:
                 wires.append(f"{ESC}0*17*{kind}VC\r")
         tie_count = len(wires)
         wires.append(f"{ESC}VM\r")
-        wires += [f"{o}V" for o in range(1, self.outputs + 1)]
-        wires += [f"{i}G" for i in range(1, self.inputs + 1)]
+        if self.audio_present:
+            wires += [f"{o}V" for o in range(1, self.outputs + 1)]
+            wires += [f"{i}G" for i in range(1, self.inputs + 1)]
         wires += ["X", f"{ESC}I\r", f"{ESC}O\r"]
         lines = await self._request_many(wires)
         pos = 0
-        for kind in (1, 2):
+        for kind in kinds:
             for start in (1, 17) if self.outputs > 16 else (1,):
                 if error_code(lines[pos]) is None:
                     self._apply_ties(kind, start, lines[pos])
@@ -890,17 +1109,19 @@ class ExtronClient:
         if mutes is not None:
             for output, value in enumerate(mutes, start=1):
                 self.video_mute[output] = bool(value & 1)
-                self.audio_mute[output] = bool(value & 2)
-        for output in range(1, self.outputs + 1):
-            line = lines[pos].strip()
-            pos += 1
-            if line.isdigit():
-                self.volume[output] = int(line)
-        for number in range(1, self.inputs + 1):
-            value = parse_gain(lines[pos])
-            pos += 1
-            if value is not None:
-                self.gain[number] = value
+                if self.audio_present:
+                    self.audio_mute[output] = bool(value & 2)
+        if self.audio_present:
+            for output in range(1, self.outputs + 1):
+                line = lines[pos].strip()
+                pos += 1
+                if line.isdigit():
+                    self.volume[output] = int(line)
+            for number in range(1, self.inputs + 1):
+                value = parse_gain(lines[pos])
+                pos += 1
+                if value is not None:
+                    self.gain[number] = value
         lock = lines[pos].strip()
         pos += 1
         if lock in ("0", "1", "2"):
@@ -917,6 +1138,14 @@ class ExtronClient:
             else None
         )
         self._notify()
+
+    async def _read_identity(self) -> None:
+        """A serial connection gives no copyright message: ask for the part number and version."""
+        part, version = await self._request_many(["N", "Q"])
+        if re.fullmatch(r"\d{2}-\d{3}-\d{2}", part.strip()):
+            self.banner["part_number"] = part.strip()
+        if re.fullmatch(r"[\d.]+", version.strip()):
+            self.banner["firmware"] = version.strip()
 
     async def _refresh_info(self) -> None:
         """Read the power and temperature status and the unit's information (all optional)."""
@@ -1055,21 +1284,52 @@ class ExtronClient:
             self._set_available(False)
             await asyncio.sleep(self._reconnect_delay)
 
-    async def _session(self) -> None:
+    async def _open_links(self) -> tuple[ExtronLink, ExtronLink | None, asyncio.Task]:
+        """Open the connection(s) and start listening; returns the command link, the event link and the reader.
+
+        A unit with Ethernet gives a copyright message and gets two connections (one for
+        questions, one that only listens). A unit on a serial bridge gives none and has one
+        stream, so it gets one connection; that stream is left in the unit's plain mode (or put
+        back to it if another controller changed it).
+        """
         cmd = ExtronLink(self._host, self._port, self._password)
-        evt = ExtronLink(self._host, self._port, self._password)
-        reader: asyncio.Task | None = None
+        evt: ExtronLink | None = None
         try:
             await cmd.open()
+            self.banner, self.privilege = dict(cmd.banner), cmd.privilege
+            self._single = not cmd.banner
+            self._cmd, self._evt = cmd, None
+            if self._single:
+                await cmd.write(f"{ESC}CV\r")
+                mode = await cmd.read_line(2)
+                if mode is not None and mode.strip() in ("2", "3"):
+                    await cmd.write(f"{ESC}1CV\r")
+                    await cmd.read_line(2)
+                return cmd, None, asyncio.create_task(self._single_reader(cmd))
+            evt = ExtronLink(self._host, self._port, self._password)
             await evt.open()
-            self.banner, self.privilege = cmd.banner, cmd.privilege
-            self._cmd, self._evt = cmd, evt
+            self._evt = evt
             # Plain replies on the command connection, a running commentary on the event one.
             await cmd.write(f"{ESC}0CV\r")
             await cmd.read_line(2)
             await evt.write(f"{ESC}3CV\r")
             await evt.read_line(2)
-            reader = asyncio.create_task(self._event_loop(evt))
+            return cmd, evt, asyncio.create_task(self._event_loop(evt))
+        except BaseException:
+            self._cmd = self._evt = None
+            await cmd.close()
+            if evt is not None:
+                await evt.close()
+            raise
+
+    async def _session(self) -> None:
+        links: list[ExtronLink] = []
+        reader: asyncio.Task | None = None
+        try:
+            cmd, evt, reader = await self._open_links()
+            links = [link for link in (cmd, evt) if link is not None]
+            if not self.banner:
+                await self._read_identity()
             await self._refresh_core()
             await self._refresh_names()
             await self.async_refresh_presets()
@@ -1098,7 +1358,7 @@ class ExtronClient:
                     waiter.cancel()
                 if reader.done():
                     reader.result()
-                    raise ExtronConnectionError("Event connection closed")
+                    raise ExtronConnectionError("Connection closed")
                 now = loop.time()
                 if (
                     self._refresh_event.is_set()
@@ -1106,10 +1366,13 @@ class ExtronClient:
                 ):
                     await self._refresh_core()
                     await self._refresh_info()
+                    # A cleared preset is not announced by every unit, so look again.
+                    await self.async_refresh_presets()
                     last_full = last_keepalive = loop.time()
                 elif now - last_keepalive >= KEEPALIVE_SECONDS:
                     await self._request("Q")
-                    await evt.write("Q")
+                    if evt is not None:
+                        await evt.write("Q")
                     last_keepalive = loop.time()
         finally:
             if reader is not None:
@@ -1117,5 +1380,6 @@ class ExtronClient:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await reader
             self._cmd = self._evt = None
-            await cmd.close()
-            await evt.close()
+            self._inbox = None
+            for link in links:
+                await link.close()

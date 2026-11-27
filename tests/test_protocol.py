@@ -333,7 +333,8 @@ def test_parse_status_and_info() -> None:
 
     status = parse_status("5.06 3.32 2.51 11.15 -5.04 -11.98 11.52 71.60 1081 1095 1 1")
     assert status["temp_f"] == 71.6 and status["psu2"] == 1 and status["fan1"] == 1081
-    assert parse_status("3.3 5.0 -5 15 -15 70") == {}
+    assert parse_status("3.3 5.0 -5 15 -15 70")["temp_f"] == 70
+    assert parse_status("3.3 5.0 -5") == {}
     assert parse_status("E10") == {}
     assert parse_info("timeout", "00030") == 300
     assert parse_info("connections", "006") == 6

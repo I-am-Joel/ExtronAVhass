@@ -26,10 +26,24 @@ class Conn:
 class Sim:
     """Ties, mutes, volumes, levels, names, lock, groups and 32 presets."""
 
-    def __init__(self, size: int = 24, password: str = "") -> None:
-        """Set up the object."""
+    def __init__(
+        self,
+        size: int = 24,
+        password: str = "",
+        *,
+        banner: bool = True,
+        short_status: bool = False,
+        audio: bool = True,
+    ) -> None:
+        """Set up the object (``banner`` False and ``short_status`` True behave like the 1616 on a serial bridge)."""
         self.n = size
         self.password = password
+        self.banner = banner
+        self.short_status = short_status
+        self.audio_side = audio
+        self.late_zone_reply: str | None = None
+        self.before_reply: list[str] = []  # lines to send ahead of the next reply (an announcement in between)
+        self.echo_preset_clear = False  # the 2424 does not tell other connections about a clear
         self.video = dict.fromkeys(range(1, size + 1), 0)
         self.audio = dict.fromkeys(range(1, size + 1), 0)
         self.vmute = dict.fromkeys(range(1, size + 1), False)
@@ -60,7 +74,7 @@ class Sim:
         for line in self.log:
             if line.startswith("ESC"):
                 body = line[3:]
-                if re.fullmatch(r"\d+ZG|\d{4,}[IO]|\+Q.*|[\d/ :]+CT|-?\d+:\d\d[C]Z|[0-3]CX|Z[ZAV]", body):
+                if re.fullmatch(r"\d+ZG|\d{4,}[IO]|\+Q.*|[\d/ :]+CT|[+-]?\d+[:.]\d\d[C]Z|[0-3]CX|Z[ZAV]", body):
                     found.append(line)
             elif (
                 re.fullmatch(
@@ -98,12 +112,16 @@ class Sim:
         """Send one reply line."""
         if self.mute_replies:
             return
+        for line in self.before_reply:
+            conn.writer.write((line + "\r\n").encode("latin-1"))
+        self.before_reply = []
         conn.writer.write((text + "\r\n").encode("latin-1"))
 
     def event(self, text: str, source: Conn | None = None) -> None:
-        """Tell every verbose-3 connection (except the one that caused it)."""
+        """Tell every verbose-3 connection (every connection of a serial unit), except the one that caused it."""
         for conn in self.conns:
-            if conn is not source and conn.verbose == 3:
+            wanted = conn.verbose >= 1 if not self.banner else conn.verbose == 3
+            if conn is not source and wanted:
                 conn.writer.write((text + "\r\n").encode("latin-1"))
 
     async def handle(
@@ -111,8 +129,11 @@ class Sim:
     ) -> None:
         """Serve one client."""
         conn = Conn(writer)
+        if not self.banner:
+            conn.verbose = 1  # a serial unit comes up in mode 1: tagged changes, bare reads, announcements
         self.conns.append(conn)
-        writer.write(BANNER.encode())
+        if self.banner:
+            writer.write(BANNER.encode())
         if self.password:
             conn.authed = False
             writer.write(b"Password:\r\n")
@@ -134,6 +155,10 @@ class Sim:
 
     def process(self, conn: Conn) -> None:
         """Parse as many complete commands as the buffer holds."""
+        if self.late_zone_reply is not None and conn.buffer:
+            # A zone set with a leading plus sign is answered only when the next command arrives.
+            reply, self.late_zone_reply = self.late_zone_reply, None
+            self.send(conn, reply)
         if not conn.authed:
             while "\r" in conn.buffer:
                 line, conn.buffer = conn.buffer.split("\r", 1)
@@ -153,7 +178,7 @@ class Sim:
                 self.esc(conn, body)
                 continue
             match = re.match(
-                r"(\d+)\*(\d+)([!%$&BZVGg])|(\d+)([!%$&BZVGg])|(\d+)([,.X])|(Q|I|X|S)|(\d+)\*([!%$BZ])",
+                r"(\d+)\*(\d+)([!%$&BZVGg])|(\d+)([!%$&BZVGg])|(\d+)([,.X])|(Q|I|X|S|N)|(\d+)\*([!%$BZ])",
                 conn.buffer,
             )
             if not match:
@@ -178,11 +203,18 @@ class Sim:
             return
         if t == "S":
             self.send(
-                conn, "5.06 3.32 2.51 11.15 -5.04 -11.98 11.52 71.60 1081 1095 1 1"
+                conn,
+                "3.27 5.07 -5.07 14.95 -14.97 98.60"
+                if self.short_status
+                else "5.06 3.32 2.51 11.15 -5.04 -11.98 11.52 71.60 1081 1095 1 1",
             )
             return
+        if t == "N":
+            self.send(conn, "60-472-01")
+            return
         if t == "I":
-            self.send(conn, f"V{self.n}X{self.n} A{self.n}X{self.n}")
+            audio = self.n if self.audio_side else 0
+            self.send(conn, f"V{self.n}X{self.n} A{audio}X{audio}")
             return
         if t == "X":
             self.send(conn, f"Exe{self.lock}" if self.v3(conn) else str(self.lock))
@@ -346,16 +378,19 @@ class Sim:
         }
         if body in info:
             return self.send(conn, info[body])
-        if m := re.fullmatch(r"(-?)(\d{1,2}):(\d\d)CZ", body):
+        if m := re.fullmatch(r"([+-]?)(\d{1,2})[:.](\d\d)CZ", body):
             hours, mins = int(m.group(2)), int(m.group(3))
-            total = (-1 if m.group(1) else 1) * (hours * 60 + mins)
+            total = (-1 if m.group(1) == "-" else 1) * (hours * 60 + mins)
             if mins > 59 or not -720 <= total <= 840:
                 return self.err(conn, 13)
             sign = "-" if total < 0 else "+" if total > 0 else ""
             self.zone = f"{sign}{abs(total) // 60:02d}:{abs(total) % 60:02d}"
+            if m.group(1) == "+":
+                self.late_zone_reply = f"Ipz{self.zone}"
+                return None
             self.send(conn, f"Ipz{self.zone}")
             self.event(f"Ipz{self.zone}", conn)
-            return
+            return None
         if m := re.fullmatch(r"(\d)CX", body):
             if int(m.group(1)) > 3:
                 return self.err(conn, 13)
@@ -441,7 +476,8 @@ class Sim:
                 return self.err(conn, 13)
             self.presets.pop(p, None)
             self.send(conn, f"Zpg{p:02d}")
-            self.event(f"Zpg{p:02d}", conn)
+            if self.echo_preset_clear:
+                self.event(f"Zpg{p:02d}", conn)
             return
         if body in ("I", "O"):
             groups = self.groups_in if body == "I" else self.groups_out

@@ -9,19 +9,20 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
 from homeassistant.util import dt as dt_util
 
 from . import strip_video
 from .const import DST_OPTIONS, GROUP_OPTIONS, LOCK_OPTIONS, SOURCE_MIXED
-from .protocol import MAX_OFFSET_MINUTES, MIN_OFFSET_MINUTES
 from .entity import (
     ExtronConfigEntry,
     ExtronEntity,
+    is_scaler,
     name_to_number,
     number_to_name,
     source_options,
 )
+from .protocol import MAX_OFFSET_MINUTES, MIN_OFFSET_MINUTES
+from .scaler_entities import setup_scaler_selects
 
 LOCK_BY_LABEL = {label: mode for mode, label in LOCK_OPTIONS.items()}
 GROUP_BY_LABEL = {label: group for group, label in GROUP_OPTIONS.items()}
@@ -46,6 +47,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the selects."""
+    if is_scaler(entry):
+        await setup_scaler_selects(entry, async_add_entities)
+        return
     data = entry.runtime_data
     entities: list[SelectEntity] = [
         ExtronAllOutputsSelect(entry),
@@ -53,10 +57,13 @@ async def async_setup_entry(
         ExtronTimeZoneSelect(entry),
         ExtronDaylightSavingSelect(entry),
     ]
+    audio = data.client.audio_present
     for output in range(1, data.client.outputs + 1):
-        entities.append(ExtronLinkedSelect(entry, output))
+        if audio:
+            entities.append(ExtronLinkedSelect(entry, output))
         entities.append(ExtronLayerSelect(entry, output, video=True))
-        entities.append(ExtronLayerSelect(entry, output, video=False))
+        if audio:
+            entities.append(ExtronLayerSelect(entry, output, video=False))
         entities.append(ExtronGroupSelect(entry, output, is_output=True))
     for number in range(1, data.client.inputs + 1):
         entities.append(ExtronGroupSelect(entry, number, is_output=False))
@@ -223,9 +230,7 @@ class ExtronAllOutputsSelect(ExtronEntity, SelectEntity):
     @property
     def current_option(self) -> str | None:
         """Return the input feeding every output (video and audio), or Mixed."""
-        client = self._client
-        outputs = range(1, client.outputs + 1)
-        values = {client.video.get(o) for o in outputs} | {client.audio.get(o) for o in outputs}
+        values = self._client.source_values()
         if None in values:
             return None
         if len(values) != 1:
@@ -275,7 +280,7 @@ class ExtronTimeZoneSelect(ExtronEntity, SelectEntity):
 
 
 class ExtronDaylightSavingSelect(ExtronEntity, SelectEntity):
-    """The unit's daylight saving rule."""
+    """The unit's daylight saving rule. Changing it also sets the unit's clock to Home Assistant's local time."""
 
     _attr_name = "Daylight saving"
     _attr_entity_category = EntityCategory.CONFIG
@@ -293,5 +298,8 @@ class ExtronDaylightSavingSelect(ExtronEntity, SelectEntity):
         return DST_OPTIONS.get(rule) if isinstance(rule, int) else None
 
     async def async_select_option(self, option: str) -> None:
-        """Set the rule."""
+        """Set the rule, then the clock (the unit's displayed time moves with the rule)."""
+        self._ensure_writable()
         await self._call(self._client.async_set_dst(DST_BY_LABEL[option]))
+        now = dt_util.now().replace(tzinfo=None, microsecond=0)
+        await self._call(self._client.async_set_clock(now))
