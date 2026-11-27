@@ -1,17 +1,13 @@
 # Extron Matrix Switcher for Home Assistant
 
-Control and monitor an Extron CrossPoint / MAV Plus matrix switcher, or an
-IN1508 scaling presentation switcher, from Home Assistant, with two-way status:
-changes made on the unit's front panel, its web page or another controller
-appear in Home Assistant straight away, and changes made in Home Assistant are
-sent to the unit.
+Control and monitor an Extron AV devices including CrossPoint / MAV Plus matrix switchers and presentation scalers from Home Assistant, with two-way status:
+changes made in the integration or on a device's front panel, its web page or another controller,
+are synchronised in real time.
 
-> **Status:** 0.2.0. Written from live probes of three units: an **Extron MAV
+> **Status:** 0.2.0. Written from live probes and real-world tests of three units: an **Extron MAV
 > Plus 2424 AV** (firmware 2.03, Ethernet), an **Extron MAV Plus 1616**
-> (firmware 1.06, serial port through a serial-to-Ethernet bridge) and an
-> **Extron IN1508** (firmware 2.25, serial through a bridge). The integration
-> itself has so far been run against simulations of those units, built from the
-> probe results. Other CrossPoint and MAV sizes use the same instruction set and
+> (firmware 1.06, serial port through an Ethernet to serial bridge) and an
+> **Extron IN1508** (firmware 2.25, serial through a bridge). Other CrossPoint and MAV sizes use the same instruction set and
 > are expected to work, but have not been tried.
 
 ## What you get
@@ -55,13 +51,12 @@ their own names in Home Assistant (see [Names](#names)).
 2. Restart Home Assistant.
 3. **Settings > Devices & services > Add integration > Extron**.
 
-Enter the unit's IP address (port 23). Leave the password empty if the unit has
-none. A unit with Ethernet is reached directly. A unit with only a serial port
-(the IN1508 is one) is reached through a serial-to-Ethernet bridge: give the
-bridge's address and the TCP port it forwards to the unit's serial port (9600
-baud, 8 data bits, no parity, 1 stop bit). The integration works out what it has
-been given: a matrix switcher (with or without an audio side, with or without a
-copyright message on connecting) or an IN1508.
+Enter the unit's IP address if the device is connected to your network via Ethernet (the default port 23). Leave the password empty if the unit has
+none. If you're connecting a device via an Ethernet to serial bridge then enter the
+bridge's IP and the TCP port it forwards to the unit's serial port. For those units tested, the communication configuration for the bridge is 9600
+baud, 8 data bits, no parity, 1 stop bit - but check your own device to be certain.
+
+The integration will then work out what you've connected, eg a matrix switcher or a presentation scaler, what breakout features are available and what controls can be exposed.
 
 ## Security
 
@@ -71,12 +66,9 @@ copyright message on connecting) or an IN1508.
 * **Read-only** (a tick box when you add the unit, changeable with Reconfigure)
   makes the integration refuse every change at the lowest level, whatever
   entities or automations ask. Controls still show the unit's state; trying to
-  use one gives a clear error. Use this for a unit that is in service.
-* With an administrator password the integration can change anything the front
-  panel can, including presets and the lock. It never sends a whole-switcher or factory
-  reset and never changes a password or the network settings. The only resets it
-  can send are the three milder ones in [Resets](#resets) (each needs a second
-  press) and the one-preset **Clear preset**.
+  use one gives a clear error.
+* With full access the integration can change anything the front
+  panel can, including presets and the lock. Excluded from this are factory reset, password control and some reset functions.
 
 ## Route action
 
@@ -103,51 +95,44 @@ nothing is changed. A read-only unit refuses it.
 The input and output **Group** selects, the **Save / Clear preset** buttons and the
 **Reset all input levels** and **Reset all output volumes** buttons are off by default. **Configure > Show advanced controls** turns them all on
 together; unticking turns them all off again (including any you had switched on
-by hand). Home Assistant reloads the unit about 30 seconds after enabling.
+by hand).
 
 ## Resets
 
 Three buttons reset one kind of setting on every input or output at once.
-**Reset all mutes** is on by default; the other two are off (see Advanced controls):
+**Reset all mutes** is enabled by default; the other two are disabled (as per "Advanced controls"):
 
 * **Reset all mutes** unmutes the video and audio of every output.
 * **Reset all input levels** sets every audio input level to 0 dB.
 * **Reset all output volumes** sets every output's volume to 64, the top of the
-  unit's scale. **Anything audible connected to the outputs could suddenly be
-  loud.**
+  unit's scale.
 
-Each button needs a **second press within 10 seconds**; the first press only arms
-it and shows a notification saying what will happen. The unit does not announce
-these resets, so the integration reads everything again afterwards. A read-only
-unit refuses them. Nothing else changes (ties, presets, names, network settings
-and passwords are untouched).
+Each reset button needs to be double pressed. Extron devices don't announce
+these resets, so the integration rereads the device afterwards. A read-only
+unit refuses them.
 
 ## Presets
 
-Presets store **ties only** (not volume, levels or mutes), exactly as on the
-front panel. The unit has no "are you sure" of its own over the network, so the
-**Save preset** and **Clear preset** buttons add one: if the preset is empty,
-Save acts at once; if it already holds something, the first press only "arms"
+Presets store **ties only** (not volume, levels or mutes), matching front panel behaviour. 
+If the preset is blank, Save acts without challenge; if it already holds something, the first press only "arms"
 the button (a notification appears and the button's `armed` attribute turns
-on), and a second press within 10 seconds goes ahead. The wait is
-a safety measure and resets itself.
+on), and a second press within 10 seconds goes ahead.
 
 ## Names
 
 Open the integration and choose **Configure** to edit four lists, one name per
 line: video input names, audio input names, video output names, audio output
-names. A blank line keeps the default (the unit's name, with " Video" or
-" Audio" added). Names only change what Home Assistant shows; nothing is written
-to the unit. The same screen sets the full-refresh interval (60 seconds by
-default; the unit reports changes by itself, so this is only a safety net).
+names. A blank line keeps the default (the unit's name, with "Video" or
+"Audio" appended). Names only change what Home Assistant shows; nothing is written
+to the device. The same screen sets the full-refresh interval (60 seconds by
+default; the unit reports changes by itself - full refreshes serve as a safety net).
 
-If you rename an input on the unit itself, reload the integration to pick up
+If you rename an input on the device itself, reload the integration to pick up
 the new name.
 
-## IN1508 scaling switcher
+## Presentation scaler (tested on an IN1508)
 
-An IN1508 (part number 60-569) is controlled over its serial port through a
-serial-to-Ethernet bridge (see Install). It gets a device of its own with:
+Presentation scalers show entities relevant to their functionality:
 
 | Entity | Type | What it does |
 | -- | -- | -- |
@@ -163,58 +148,33 @@ serial-to-Ethernet bridge (see Install). It gets a device of its own with:
 | Signal standard | `sensor` | The video standard the unit detects (None, NTSC 3.58, NTSC 4.43, PAL or SECAM). Diagnostic. |
 | Firmware, part number, Connection | `sensor` / `binary_sensor` | Diagnostic. |
 
-Things worth knowing:
+From testing:
 
 * Colour is offered on inputs 1 to 4 only. The unit refuses **Tint** while the
-  input carries a PAL signal, so Tint is unavailable then.
-* Mutes and freeze can change by themselves. The video output mutes itself when
-  the selected input has no signal, and choosing a different input clears audio
+  input carries a PAL signal.
+* Mutes and freeze are dynamically changed by the device. The video output mutes itself when
+  the selected input has no signal and choosing a different input clears audio
   mute and freeze. The integration reads them again after every input change.
-* There are no ties, presets, names or groups on this unit, so none are shown.
-  The options screen offers the refresh interval only.
-* A serial bridge allows only one connection to the unit at a time, so the
-  integration uses a single connection here (the matrix switchers use two).
-
-## How it connects
-
-For a matrix switcher, two Telnet connections are kept open: one for questions and changes, and one
-that the unit uses to report anything that changes. A harmless keep-alive is
-sent every 45 seconds (the unit drops a silent connection after about five
-minutes). If the unit is off or the link drops, or the unit closes a quiet
-connection, the entities go unavailable and the integration reconnects by
-itself. Ties are read again when the unit announces a front-panel tie or a
-preset recall.
 
 ## Limitations
 
-* **Front panel lock:** only limits the front panel. Commands from Home
+* **Front panel lock:** only limits the device's front panel. Commands from Home
   Assistant still work while it is on.
 * **I/O groups** only limit which ties the front panel allows; commands from
   Home Assistant ignore them.
 * **Recall** restores the preset's ties only.
-* **Volume** is shown on the unit's own 0 to 64 scale (0 to 100 on the IN1508).
-* **Clock and time zone:** the unit's clock shows local time, so it moves when
+* **Volume** is shown on the unit's own 0 to 64 scale (eg 0 to 100 on the IN1508).
+* **Clock and time zone:** the device's clock shows local time, so it moves when
   the time zone changes. Choosing a **Time zone** therefore also sets the clock
   to Home Assistant's local time. Offsets that are not a whole or half hour
-  (such as +05:45) are not offered. A unit that has its offset set some other
+  (such as +05:45) are not offered. This is a limit of the device not the integration. A device that has its offset set some other
   way shows no choice selected.
 * **Unit clock:** the unit gives no time zone with its clock, so the sensor
   reads it as Home Assistant's local time.
 * **Cleared presets:** a unit that is told by another controller to clear a
   preset does not always announce it, so the integration finds out at the next
-  full refresh.
-* The password prompt and user-level logins have not been tried on a real unit,
-  and no matrix switcher other than a MAV Plus 1616 and 2424 has been probed.
-
-## Tests
-
-```
-pip install pytest-homeassistant-custom-component
-pytest
-```
-
-The tests run against a simulated unit (`tests/ha/sim.py`) built from what the
-real unit did in the probe runs.
+  full refresh (adjustable in Configuration, set to 60 seconds by default).
+* The password prompt and user-level logins have not been tested on a real unit.
 
 ## Licence
 
