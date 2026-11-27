@@ -178,4 +178,8 @@ From testing:
 
 ## Licence
 
+The code was written with Claude.
+
+This integration was not written by, or with the endorsement or support of, Extron but meets the need to extend the life of models that are no longer supported by the manufacturer and might otherwise go to landfill.
+
 MIT (see the `LICENSE` file). Copyright (c) 2026 Joel Goodman.
